@@ -17,6 +17,8 @@ module tb_soc;
     wire pwm_out;
     wire uart_txd;
     wire [7:0] leds;
+    reg  enc_a = 1'b0;
+    reg  enc_b = 1'b0;
 
     soc_top #(
         .FIRMWARE_HEX ("firmware.hex"),
@@ -26,7 +28,9 @@ module tb_soc;
         .rst_n    (rst_n),
         .pwm_out  (pwm_out),
         .uart_txd (uart_txd),
-        .leds     (leds)
+        .leds     (leds),
+        .enc_a    (enc_a),
+        .enc_b    (enc_b)
     );
 
     // ---- UART line decoder (8N1, DIV=8) -------------------------------------
@@ -62,6 +66,53 @@ module tb_soc;
         end
     end
 
+    // ---- quadrature encoder generator + checker -----------------------------
+    // Drives enc_a/enc_b through real Gray-code waveforms in both directions
+    // and cross-checks the decoder's internal COUNT after every step against
+    // an independently-computed expected value.
+    reg [1:0] enc_ab      = 2'b00;
+    integer   enc_expected = 0;
+    integer   enc_errors   = 0;
+
+    task enc_step(input dir);   // dir=1: forward (+1), dir=0: reverse (-1)
+        begin
+            if (dir) begin
+                case (enc_ab)
+                    2'b00: enc_ab = 2'b01;
+                    2'b01: enc_ab = 2'b11;
+                    2'b11: enc_ab = 2'b10;
+                    2'b10: enc_ab = 2'b00;
+                endcase
+                enc_expected = enc_expected + 1;
+            end else begin
+                case (enc_ab)
+                    2'b00: enc_ab = 2'b10;
+                    2'b10: enc_ab = 2'b11;
+                    2'b11: enc_ab = 2'b01;
+                    2'b01: enc_ab = 2'b00;
+                endcase
+                enc_expected = enc_expected - 1;
+            end
+            {enc_a, enc_b} = enc_ab;
+            repeat (8) @(posedge clk);   // let 2FF sync + decode settle
+            if (dut.u_enc.count !== enc_expected) begin
+                $display("[ENC ] MISMATCH: count=%0d expected=%0d",
+                          dut.u_enc.count, enc_expected);
+                enc_errors = enc_errors + 1;
+            end
+        end
+    endtask
+
+    integer enc_i;
+    initial begin : enc_mon
+        @(posedge rst_n);
+        repeat (20) @(posedge clk);         // let CPU boot settle first
+        for (enc_i = 0; enc_i < 24; enc_i = enc_i + 1) enc_step(1);   // forward
+        for (enc_i = 0; enc_i < 15; enc_i = enc_i + 1) enc_step(0);   // reverse
+        $display("[ENC ] done: count=%0d expected=%0d errors=%0d",
+                  dut.u_enc.count, enc_expected, enc_errors);
+    end
+
     // ---- run ----------------------------------------------------------------
     initial begin
         if ($test$plusargs("trace")) begin
@@ -75,12 +126,13 @@ module tb_soc;
         repeat (400000) @(posedge clk);
 
         $display("");
-        if (uart_chars >= 3 && pulse_count >= 5)
-            $display("RESULT: PASS  (uart_chars=%0d, pwm_pulses=%0d)",
-                     uart_chars, pulse_count);
+        if (uart_chars >= 3 && pulse_count >= 5 &&
+            enc_errors == 0 && dut.u_enc.count === 9)
+            $display("RESULT: PASS  (uart_chars=%0d, pwm_pulses=%0d, enc_errors=%0d, enc_count=%0d)",
+                     uart_chars, pulse_count, enc_errors, dut.u_enc.count);
         else
-            $display("RESULT: FAIL  (uart_chars=%0d, pwm_pulses=%0d)",
-                     uart_chars, pulse_count);
+            $display("RESULT: FAIL  (uart_chars=%0d, pwm_pulses=%0d, enc_errors=%0d, enc_count=%0d)",
+                     uart_chars, pulse_count, enc_errors, dut.u_enc.count);
         $finish;
     end
 

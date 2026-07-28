@@ -22,7 +22,8 @@ the peripheral-building phase.
 | 0x0200_0000 | PWM                        | 0x0 CTRL(en), 0x4 PRESCALE, 0x8 PERIOD, 0xC DUTY |
 | 0x0300_0000 | UART TX                    | 0x0 DATA, 0x4 STATUS (bit0 busy)                 |
 | 0x0400_0000 | GPIO                       | 0x0 LEDs (8-bit)                                 |
-| 0x0500_0000 | (next: quadrature encoder) |
+| 0x0500_0000 | Quadrature encoder         | 0x0 COUNT (signed), 0x4 CTRL (bit0 clear)        |
+| 0x0600_0000 | (next: timer)              |
 
 Assign new peripherals the next free 0xNN00_0000 slot; update this table,
 the decoder, and the read mux in `soc_top.v` together.
@@ -49,7 +50,7 @@ Simulation (no RISC-V toolchain needed):
     cd sim
     python3 ../fw/gen_firmware.py
     iverilog -g2005-sv -o tb_soc.vvp tb_soc.v ../rtl/soc_top.v \
-             ../rtl/pwm.v ../rtl/uart_tx.v ../rtl/picorv32.v
+             ../rtl/pwm.v ../rtl/uart_tx.v ../rtl/quad_enc.v ../rtl/picorv32.v
     vvp tb_soc.vvp            # add +trace for tb_soc.vcd
 
 Add every new RTL file to the iverilog command line (and keep README in
@@ -71,8 +72,8 @@ sync). C firmware for real hardware: `fw/Makefile` (riscv32 gcc).
 
 ## Roadmap (build in this order)
 
-1. Quadrature encoder decoder (0x0500_0000) — 2FF synchronizers per input,
-   4-state transition decoder, 32-bit signed COUNT register, clear bit
+1. ~~Quadrature encoder decoder (0x0500_0000)~~ — done: 2FF synchronizers per
+   input, 4-state transition decoder, 32-bit signed COUNT register, clear bit
 2. Timer + interrupt — enable PicoRV32 IRQ, 1 kHz tick, first ISR;
    then closed-loop position control demo (encoder -> PID -> PWM)
 3. UART RX — start-bit detect, mid-bit sampling, small FIFO

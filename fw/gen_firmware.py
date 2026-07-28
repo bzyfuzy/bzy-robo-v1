@@ -8,7 +8,9 @@ What the program does:
       fast to simulate; on a real 50 MHz board the C firmware uses
       PRESCALE=49 for true 1 us ticks.)
   2. UART: print "OK\n".
-  3. Loop forever sweeping DUTY 1000 -> 2000 in steps of 100 per frame delay.
+  3. Loop forever sweeping DUTY 1000 -> 2000 in steps of 100 per frame delay,
+     and each iteration copy the encoder COUNT (low byte) out to the LEDs so
+     the live position count is observable.
 
 Every instruction below is encoded by the helper functions - readable
 RV32I encoding practice. Output: firmware.hex (one 32-bit word per line),
@@ -56,10 +58,13 @@ PWM  = 5   # x5 = 0x0200_0000
 UART = 6   # x6 = 0x0300_0000
 TMP  = 7
 DUTY = 8
-CHR  = 11
 STAT = 10
+CHR  = 11
 DLY  = 12
 LIM  = 13
+GPIO = 14  # x14 = 0x0400_0000
+ENC  = 15  # x15 = 0x0500_0000
+CNT  = 16  # scratch: last-read encoder COUNT
 
 prog = []
 def emit(word): prog.append(word)
@@ -67,6 +72,8 @@ def emit(word): prog.append(word)
 # --- setup ------------------------------------------------------------------
 emit(lui(PWM,  0x02000))          #  0: x5 = PWM base
 emit(lui(UART, 0x03000))          #  4: x6 = UART base
+emit(lui(GPIO, 0x04000))          #    x14 = GPIO base
+emit(lui(ENC,  0x05000))          #    x15 = ENC base
 emit(sw(X0, PWM, 4))              #  8: PRESCALE = 0 (1 tick per clk, sim-fast)
 emit(lui(TMP, 5))                 #  c: x7 = 20480
 emit(addi(TMP, TMP, -480))        # 10: x7 = 20000
@@ -87,6 +94,8 @@ for ch in (ord('O'), ord('K'), 10):
 emit(addi(DUTY, X0, 1000))        # DUTY = 1000
 sweep_top = len(prog) * 4
 emit(sw(DUTY, PWM, 12))           # write duty
+emit(lw(CNT, ENC, 0))             # CNT = encoder COUNT
+emit(sw(CNT, GPIO, 0))            # LEDs = COUNT (low byte latched by hw)
 emit(lui(DLY, 5))                 # delay counter = 20000 (~ one frame)
 emit(addi(DLY, DLY, -480))
 emit(addi(DLY, DLY, -1))          # DLY--

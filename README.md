@@ -5,7 +5,8 @@ a glitch-free servo PWM peripheral, a TX UART for debug prints, and a
 GPIO/LED register — all on PicoRV32's simple native memory bus.
 
 **Status: verified in simulation.** The CPU boots, prints over a decoded
-serial line, and sweeps the servo PWM duty in clean 20 ms frames.
+serial line, sweeps the servo PWM duty in clean 20 ms frames, and tracks a
+quadrature encoder's position.
 
 ## Memory map
 | Base        | Block | Registers |
@@ -14,17 +15,19 @@ serial line, and sweeps the servo PWM duty in clean 20 ms frames.
 | 0x0200_0000 | PWM   | 0x0 CTRL, 0x4 PRESCALE, 0x8 PERIOD, 0xC DUTY |
 | 0x0300_0000 | UART  | 0x0 DATA, 0x4 STATUS(bit0 busy) |
 | 0x0400_0000 | GPIO  | 0x0 LEDs |
+| 0x0500_0000 | Quadrature encoder | 0x0 COUNT (signed), 0x4 CTRL(bit0 clear) |
 
 ## Run the simulation (no RISC-V toolchain needed)
 ```bash
 cd sim
 python3 ../fw/gen_firmware.py      # hand-assembled boot firmware -> firmware.hex
 iverilog -g2005-sv -o tb_soc.vvp tb_soc.v ../rtl/soc_top.v \
-         ../rtl/pwm.v ../rtl/uart_tx.v ../rtl/picorv32.v
+         ../rtl/pwm.v ../rtl/uart_tx.v ../rtl/quad_enc.v ../rtl/picorv32.v
 vvp tb_soc.vvp                     # add: vvp tb_soc.vvp +trace  for a VCD
 ```
 Expected: `[UART] 'O' 'K'`, PWM pulses stepping 1000 -> 1100 -> ... ticks,
-final line `RESULT: PASS`.
+encoder COUNT tracking a driven 24-step-forward/15-step-reverse waveform
+with zero mismatches, final line `RESULT: PASS`.
 
 ## Real hardware
 `fw/main.c` + `fw/Makefile` build the same program with a riscv32 gcc
@@ -41,8 +44,8 @@ common ground). `uart_txd` -> USB-serial adapter at clk/UART_DIV baud.
   (LUI/ADDI/LW/SW/BNE/BLT/JAL) written out by hand.
 
 ## Roadmap
-1. **(this)** CPU + PWM + UART: servo sweep
-2. Quadrature encoder input + timer interrupt -> 1 kHz closed-loop position control
+1. **(done)** CPU + PWM + UART: servo sweep
+2. **(this)** Quadrature encoder input; next: timer interrupt -> 1 kHz closed-loop position control
 3. NPU integration (perception domain) + camera capture
 4. Mailbox contract: vision detections -> control setpoints
 5. Replace the SBC in the pan/tilt tracker rig; measure latency and jitter

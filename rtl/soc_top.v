@@ -12,6 +12,7 @@
 //   0x0200_0000  PWM   (CTRL / PRESCALE / PERIOD / DUTY)
 //   0x0300_0000  UART  (DATA / STATUS)
 //   0x0400_0000  GPIO  (bit per LED)
+//   0x0500_0000  ENC   (COUNT / CTRL)
 //
 // The bus is PicoRV32's native interface: the core raises mem_valid with an
 // address; the slave answers with mem_ready + mem_rdata one cycle later.
@@ -28,7 +29,10 @@ module soc_top #(
 
     output wire pwm_out,
     output wire uart_txd,
-    output wire [7:0] leds
+    output wire [7:0] leds,
+
+    input  wire enc_a,
+    input  wire enc_b
 );
 
     // ---- PicoRV32 native memory interface -----------------------------------
@@ -72,6 +76,7 @@ module soc_top #(
     wire sel_pwm  = mem_valid && (mem_addr[31:24] == 8'h02);
     wire sel_uart = mem_valid && (mem_addr[31:24] == 8'h03);
     wire sel_gpio = mem_valid && (mem_addr[31:24] == 8'h04);
+    wire sel_enc  = mem_valid && (mem_addr[31:24] == 8'h05);
 
     // one-cycle ready for every access
     always @(posedge clk or negedge rst_n) begin
@@ -131,6 +136,19 @@ module soc_top #(
     end
     assign leds = gpio_reg;
 
+    wire [31:0] enc_rdata;
+    quad_enc u_enc (
+        .clk   (clk),
+        .rst_n (rst_n),
+        .sel   (sel_enc),
+        .wstrb (wstrb_eff),
+        .addr  (mem_addr[3:0]),
+        .wdata (mem_wdata),
+        .rdata (enc_rdata),
+        .enc_a (enc_a),
+        .enc_b (enc_b)
+    );
+
     // ---- read mux (registered, valid on the ready cycle) --------------------
     always @(posedge clk) begin
         case (mem_addr[31:24])
@@ -138,6 +156,7 @@ module soc_top #(
             8'h02:   mem_rdata <= pwm_rdata;
             8'h03:   mem_rdata <= uart_rdata;
             8'h04:   mem_rdata <= {24'd0, gpio_reg};
+            8'h05:   mem_rdata <= enc_rdata;
             default: mem_rdata <= 32'h0000_0000;
         endcase
     end

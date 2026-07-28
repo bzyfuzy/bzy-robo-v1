@@ -6,6 +6,7 @@
 #define PWM_BASE  0x02000000u
 #define UART_BASE 0x03000000u
 #define GPIO_BASE 0x04000000u
+#define ENC_BASE  0x05000000u
 
 #define REG(a) (*(volatile uint32_t *)(a))
 #define PWM_CTRL     REG(PWM_BASE + 0x0)
@@ -15,6 +16,8 @@
 #define UART_DATA    REG(UART_BASE + 0x0)
 #define UART_STATUS  REG(UART_BASE + 0x4)
 #define LEDS         REG(GPIO_BASE + 0x0)
+#define ENC_COUNT    REG(ENC_BASE  + 0x0)
+#define ENC_CTRL     REG(ENC_BASE  + 0x4)
 
 static void putc(char c) {
     while (UART_STATUS & 1) ;
@@ -33,10 +36,12 @@ int main(void) {
 
     puts("robot-soc step1 boot\n");
 
+    ENC_CTRL = 1;   // clear encoder COUNT at boot
+
     uint32_t duty = 1000, dir = 1;
     for (;;) {
         PWM_DUTY = duty;
-        LEDS = (duty - 1000) / 125;        // crude position bar
+        LEDS = ENC_COUNT & 0xFFu;   // live position count
         delay(200000);
         if (dir) { duty += 10; if (duty >= 2000) dir = 0; }
         else     { duty -= 10; if (duty <= 1000) dir = 1; }

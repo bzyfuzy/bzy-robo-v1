@@ -1,0 +1,5 @@
+sim/firmware.hex
+sim/*.vvp
+sim/*.vcd
+fw/*.elf
+fw/*.hex
