@@ -17,6 +17,8 @@ quadrature encoder's position.
 | 0x0400_0000 | GPIO  | 0x0 LEDs |
 | 0x0500_0000 | Quadrature encoder | 0x0 COUNT (signed), 0x4 CTRL(bit0 clear) |
 
+Per-peripheral register reference, bit fields, and design notes: [docs/](docs/).
+
 ## Run the simulation (no RISC-V toolchain needed)
 ```bash
 cd sim
