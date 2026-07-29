@@ -185,16 +185,32 @@ verification state.
 5. Unit tb for quad_enc — done (`tb/unit/tb_quad_enc.v`: all 8 legal
    transitions, all 4 illegal skips, clear, signed overflow/underflow at
    the 32-bit boundary, contact bounce, reset). Unit tb for timer — done
-   (2026-07-29, `tb/unit/tb_timer.v`, 51 checks: period accuracy over 11
+   (2026-07-29, `tb/unit/tb_timer.v`, 52 checks: period accuracy over 11
    consecutive gaps with cycle-exact spacing, IRQ pulse width/timing,
    STATUS write-1-to-clear (write-0 no-op, survives unrelated accesses),
    disable mid-count (holds COUNT at 0, no ticks), re-enable restarts the
    count from 0 rather than resuming, PERIOD change while running in both
    directions (growing extends the current period live; shrinking below
-   the current COUNT misses that tick - exact-equality compare, no
-   catch-up), reset state. Mutation-tested against an off-by-one period
-   compare (`== period` instead of `== period - 1`) - caught with 14
-   mismatches, confirmed restored to the real off-by-one-free RTL after.
+   the current COUNT now fires the tick on the very next clock instead of
+   being missed - see below), reset state. Bounded-wait timeout guard
+   (`fork`/`join_any`) on that last check so a regression to the old
+   missed-tick behavior fails cleanly instead of hanging the sim/CI.
+   Mutation-tested twice: against an off-by-one period compare (`== period`
+   instead of `== period - 1`, caught with 14 mismatches) and, after the
+   `>=` change below, against reverting `>=` back to `==` (caught with 3
+   mismatches, no hang, thanks to the timeout guard). Both times confirmed
+   restored to the real RTL after.
+
+   **`timer.v` tick compare changed from `==` to `>=`** (2026-07-29):
+   `counter == period - 1` meant shrinking PERIOD to a value at or below
+   the running COUNT missed that tick until COUNT wrapped a 32-bit range -
+   effectively never, for a control-loop heartbeat. Changed to
+   `counter >= period - 1`, matching PERIOD's already-live (non-double-
+   buffered) semantics: the tick now always fires within one clock of any
+   PERIOD write, at latest. Rationale (a heartbeat must fail loud or fire
+   early, never skip silently) and why this is safe *because* PERIOD is
+   live-updated while PWM's DUTY is deliberately double-buffered (actuator
+   vs. our-own-ISR consumer) are both written up in `docs/timer.md`.
 6. Bus tests — byte strobes, invalid addresses, back-to-back transactions
 7. Firmware-level test — program-visible results over UART, including an
    ISR-counted timer check (ISR increments, main loop reports)

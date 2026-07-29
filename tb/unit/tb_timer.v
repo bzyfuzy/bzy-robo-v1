@@ -12,9 +12,8 @@
 //     disabled; re-enable restarts the count from 0 (not a resume)
 //   - PERIOD change while running: growing PERIOD extends the current
 //     period to the new value; shrinking PERIOD below the current COUNT
-//     misses that tick (exact-equality compare, no catch-up) until the
-//     32-bit counter wraps - demonstrated as "doesn't fire for a long time",
-//     not waited out to completion
+//     fires the tick on the very next clock (>= compare, no silent miss),
+//     checked with cycle-exact timing
 // =============================================================================
 `timescale 1ns / 1ps
 
@@ -88,6 +87,40 @@ module tb_timer;
                 $display("[TMR ] MISMATCH (pulse width): width=%0d ns expected=10 ns", $time - t_rise);
             end
             checks = checks + 1;
+        end
+    endtask
+
+    // ---- same as capture_tick, but bounded: a regression that brings back
+    //      the missed-tick behavior must fail cleanly, not hang the sim/CI
+    //      forever waiting for an irq_pulse that never comes.
+    task capture_tick_bounded(output integer t_rise, input integer max_cycles);
+        reg [31:0] t_fall;
+        integer timed_out;
+        begin
+            timed_out = 0;
+            fork
+                begin
+                    @(posedge irq_pulse);
+                    t_rise = $time;
+                    @(negedge irq_pulse);
+                    if (($time - t_rise) !== 10) begin
+                        errors = errors + 1;
+                        $display("[TMR ] MISMATCH (pulse width): width=%0d ns expected=10 ns", $time - t_rise);
+                    end
+                    checks = checks + 1;
+                end
+                begin
+                    repeat (max_cycles) @(posedge clk);
+                    timed_out = 1;
+                end
+            join_any
+            disable fork;
+            if (timed_out) begin
+                errors = errors + 1;
+                checks = checks + 1;
+                t_rise = -999999999;
+                $display("[TMR ] MISMATCH (tick timeout): no irq_pulse within %0d cycles", max_cycles);
+            end
         end
     endtask
 
@@ -195,7 +228,7 @@ module tb_timer;
         check(t_now - enable_edge_time, 60 * 10,
               "growing PERIOD mid-count extends to the new value (live compare, not double-buffered)");
 
-        $display("[TEST] PERIOD change while running: shrink below current COUNT misses the tick");
+        $display("[TEST] PERIOD change while running: shrink below current COUNT fires immediately");
         write_reg(4'h0, 32'd0);
         repeat (2) @(posedge clk);
         write_reg(4'h4, 32'd40);
@@ -204,11 +237,20 @@ module tb_timer;
         read_reg(4'h8, rv); check(rv, 20, "COUNT before shrinking PERIOD below it");
         write_reg(4'hC, 32'h1);                  // clear any STATUS left from earlier sections'
                                                   // ticks, so the check below proves a fresh baseline
-        write_reg(4'h4, 32'd10);                 // period-1=9 < current COUNT=20: can never match again
-        repeat (500) @(posedge clk);              // far more than 10x any PERIOD used above
-        check(irq_pulse, 0, "shrinking PERIOD below COUNT misses the tick (exact-equality compare, no catch-up)");
-        read_reg(4'hC, rv); check(rv, 0, "STATUS never set - the missed tick really never fired");
-        write_reg(4'h0, 32'd0);                  // disable to force COUNT back to a clean 0
+        // period-1=9 <= COUNT (21 by this write's own effective edge - the
+        // counter keeps advancing under the OLD period for that one edge,
+        // same CTRL/PERIOD-write visibility lag measured earlier in this
+        // file) - the >= compare must fire the tick on the very next clock,
+        // not miss it.
+        write_reg(4'h4, 32'd10);
+        enable_edge_time = $time - 5;
+        capture_tick_bounded(t_now, 20);   // bounded: a regression to the old
+                                            // missed-tick behavior must fail,
+                                            // not hang waiting forever
+        check(t_now - enable_edge_time, 1 * 10,
+              "shrinking PERIOD below COUNT fires the tick on the very next clock (>= compare, no silent miss)");
+        read_reg(4'hC, rv); check(rv, 1, "STATUS set - the tick really fired, not silently skipped");
+        write_reg(4'h0, 32'd0);                  // disable, clean state
 
         $display("");
         $display("[TMR ] checks=%0d errors=%0d", checks, errors);

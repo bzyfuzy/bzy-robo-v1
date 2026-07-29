@@ -17,6 +17,33 @@ IRQ: drives PicoRV32 `irq[3]`, one clk-wide pulse per tick
 after the counter was last reset (by enable, or by a previous tick) - same
 up-counter idiom as `pwm.v`'s frame counter.
 
+## PERIOD semantics: live update, `>=` compare
+
+The tick condition is `counter >= period - 1`, not `counter == period - 1`.
+This timer is a control-loop heartbeat: if firmware shrinks PERIOD to a
+value at or below the current COUNT (a live reconfiguration, or a bug in
+the caller), the tick fires on the very next clock instead of being missed
+until COUNT wraps all the way around a 32-bit range - effectively forever
+at any real clock rate. A heartbeat that can go silent for that long is
+worse than one that fires a cycle early: firing early is a visible,
+recoverable glitch; going silent means every downstream deadline that
+depends on this interrupt (a control-loop tick, a watchdog kick) is missed
+with no signal that anything went wrong. `>=` trades a possible one-tick-early
+pulse for the guarantee that the heartbeat never silently stops.
+
+PERIOD itself is a plain, immediately-effective register - not
+double-buffered like PWM's DUTY. That asymmetry is intentional, not an
+oversight: PWM's DUTY feeds an external actuator (a servo), where a value
+change landing mid-pulse would produce a torn, physically visible glitch on
+a wire nothing in software can un-glitch after the fact - hence the
+shadow-register-swapped-at-frame-boundary design. The timer's only
+consumer is our own ISR, which only ever observes PERIOD's effect through
+`irq_pulse`/COUNT/STATUS - and the `>=` compare is exactly what makes a
+live, unbuffered PERIOD safe here: even the worst-case reconfiguration
+(shrinking PERIOD out from under a running count) still produces a single,
+bounded, on-time-or-early tick, never a skipped one. Double-buffering would
+add a cycle of write-to-effect latency for no corresponding safety benefit.
+
 ## PicoRV32 IRQ mechanism (why the firmware looks the way it does)
 
 PicoRV32's interrupt interface is **not** the standard RISC-V CSR/mret

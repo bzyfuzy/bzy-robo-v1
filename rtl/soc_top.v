@@ -55,7 +55,15 @@ module soc_top #(
     // difference from reading as a cross-wired reset bug.
     // Do NOT "simplify" this by wiring .resetn(rst_n_sync) directly - that
     // reintroduces the SYNCASYNCNET warning this alias exists to avoid
-    // (verified: confirmed as a lint failure before adding this wire).
+    // (verified: confirmed as a lint failure before adding this wire). That
+    // direction is harmless, though: lint goes red and self-announces it.
+    // The dangerous direction is the opposite one: if rst_sync is ever
+    // removed or bypassed (e.g. raw rst_n wired straight into this alias)
+    // while cpu_resetn itself remains, the resulting reset-metastability
+    // bug is invisible to lint - this wire's whole job is to structurally
+    // blind the SYNCASYNCNET check to mixed sync/async use of one net, and
+    // it does that regardless of whether a real synchronizer still sits
+    // upstream of it. The alias must never outlive the synchronizer.
     wire cpu_resetn = rst_n_sync;
 
     // ---- PicoRV32 native memory interface -----------------------------------

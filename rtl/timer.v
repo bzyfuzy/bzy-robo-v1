@@ -40,7 +40,10 @@ module timer (
     reg [31:0] counter;
     reg        status_irq;
 
-    wire tick = enable && (period != 0) && (counter == period - 1);
+    // >= (not ==): if PERIOD is written to a value at or below the current
+    // COUNT, the heartbeat must fire on the very next clock, not be missed
+    // until COUNT wraps 2^32 - see docs/timer.md for the rationale.
+    wire tick = enable && (period != 0) && (counter >= period - 1);
 
     // ---- register writes ------------------------------------------------
     always @(posedge clk or negedge rst_n) begin
