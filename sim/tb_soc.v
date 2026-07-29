@@ -5,6 +5,11 @@
 //   1. UART transmits 'O', 'K', '\n' (decoded from the serial line itself)
 //   2. First measured PWM high-pulse is 1500 ticks (initial duty)
 //   3. Subsequent pulses step through the 1000..2000 sweep
+//   4. Timer fires irq[3] every PERIOD (2000) clk cycles
+//   5. Each tick's ISR increments the tick counter and mirrors it onto the
+//      `leds` pins - checked on the external pin, not by peeking at CPU
+//      registers, so it proves the whole path (timer -> IRQ -> ISR -> bus
+//      write) actually works, not just that the timer counts.
 // =============================================================================
 `timescale 1ns / 1ps
 
@@ -63,6 +68,50 @@ module tb_soc;
             high_cycles = ($time - t_rise) / 10;   // 10 ns per clk
             pulse_count = pulse_count + 1;
             $display("[PWM ] pulse %0d: high = %0d ticks", pulse_count, high_cycles);
+        end
+    end
+
+    // ---- timer IRQ / ISR monitor ---------------------------------------------
+    // Watches two independent things and cross-checks them against each other:
+    //   (a) dut.u_timer.irq_pulse - the hardware tick itself (internal signal,
+    //       like the encoder's COUNT check) - verifies PERIOD (2000 clk) timing.
+    //   (b) the `leds` pin - external, waveform-level - proves the interrupt
+    //       actually reached the CPU and the ISR ran and hit the bus, since
+    //       LEDs only change via the ISR's `sw` to GPIO.
+    integer tick_count = 0;
+    time    t_last_tick;
+    integer period_errors = 0;
+    initial begin : timer_pulse_mon
+        @(posedge rst_n);
+        @(posedge dut.u_timer.irq_pulse);   // first tick: just record it
+        t_last_tick = $time;
+        tick_count = 1;
+        forever begin
+            @(posedge dut.u_timer.irq_pulse);
+            if (($time - t_last_tick) !== 2000 * 10) begin   // 2000 clk * 10 ns/clk
+                $display("[TMR ] MISMATCH: tick %0d spacing=%0d ns (expected 20000 ns)",
+                          tick_count + 1, $time - t_last_tick);
+                period_errors = period_errors + 1;
+            end
+            t_last_tick = $time;
+            tick_count = tick_count + 1;
+        end
+    end
+
+    integer led_count = 0;
+    integer led_errors = 0;
+    reg [7:0] led_prev = 8'd0;
+    initial begin : led_mon
+        @(posedge rst_n);
+        forever begin
+            @(leds);
+            led_count = led_count + 1;
+            if (leds !== ((led_prev + 1) & 8'hFF)) begin
+                $display("[LEDS] MISMATCH: change %0d leds=%0d expected=%0d",
+                          led_count, leds, (led_prev + 1) & 8'hFF);
+                led_errors = led_errors + 1;
+            end
+            led_prev = leds;
         end
     end
 
@@ -125,14 +174,18 @@ module tb_soc;
         // enough time for boot + UART + ~8 PWM frames (20000 cycles each)
         repeat (400000) @(posedge clk);
 
+        $display("[TMR ] ticks=%0d period_errors=%0d", tick_count, period_errors);
+        $display("[LEDS] changes=%0d led_errors=%0d", led_count, led_errors);
         $display("");
         if (uart_chars >= 3 && pulse_count >= 5 &&
-            enc_errors == 0 && dut.u_enc.count === 9)
-            $display("RESULT: PASS  (uart_chars=%0d, pwm_pulses=%0d, enc_errors=%0d, enc_count=%0d)",
-                     uart_chars, pulse_count, enc_errors, dut.u_enc.count);
+            enc_errors == 0 && dut.u_enc.count === 9 &&
+            period_errors == 0 && led_errors == 0 &&
+            tick_count >= 100 && led_count == tick_count)
+            $display("RESULT: PASS  (uart_chars=%0d, pwm_pulses=%0d, enc_errors=%0d, enc_count=%0d, ticks=%0d)",
+                     uart_chars, pulse_count, enc_errors, dut.u_enc.count, tick_count);
         else
-            $display("RESULT: FAIL  (uart_chars=%0d, pwm_pulses=%0d, enc_errors=%0d, enc_count=%0d)",
-                     uart_chars, pulse_count, enc_errors, dut.u_enc.count);
+            $display("RESULT: FAIL  (uart_chars=%0d, pwm_pulses=%0d, enc_errors=%0d, enc_count=%0d, ticks=%0d)",
+                     uart_chars, pulse_count, enc_errors, dut.u_enc.count, tick_count);
         $finish;
     end
 
