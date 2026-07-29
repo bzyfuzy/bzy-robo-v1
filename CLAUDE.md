@@ -132,8 +132,8 @@ only when a board is chosen, `asic/` only when an ASIC artifact exists.
 | Item                          | RTL     | Simulated & PASS confirmed |
 | ----------------------------- | ------- | -------------------------- |
 | Baseline (PWM+UART+GPIO boot) | done    | yes (original baseline)    |
-| Quadrature encoder            | written | pending                    |
-| Timer + IRQ                   | written | pending (hand-traced only) |
+| Quadrature encoder            | written | yes (2026-07-29, iverilog integration tb: enc_errors=0, enc_count=9) |
+| Timer + IRQ                   | written | yes (2026-07-29, iverilog integration tb: ticks=199, period_errors=0, led_errors=0) |
 
 Update this table the moment a sim actually runs. "Hand-traced" is not a
 verification state.
