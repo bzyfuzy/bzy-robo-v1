@@ -15,6 +15,7 @@
 //     even if software updates DUTY mid-frame.
 //   * out is high while counter < duty_active.
 // =============================================================================
+`timescale 1ns / 1ps
 `default_nettype none
 
 module pwm (
@@ -40,7 +41,6 @@ module pwm (
     reg [31:0] tick_cnt;
     reg [31:0] counter;
     wire       tick = (tick_cnt == prescale);
-    wire       frame_start = tick && (counter >= period - 1);
 
     // ---- register writes ----------------------------------------------------
     always @(posedge clk or negedge rst_n) begin

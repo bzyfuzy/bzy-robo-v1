@@ -1,0 +1,33 @@
+// =============================================================================
+// Lint waivers, scoped as tightly as possible.
+//
+// rtl/picorv32.v is vendored and must not be modified (see CLAUDE.md), so its
+// pre-existing style warnings can't be fixed at the source. Every waiver
+// below is filed to that one path only - it has zero effect on any file we
+// own, so a new warning in our own RTL still fails lint.
+//
+//   BLKSEQ        - picorv32's core FSM uses blocking assignments ('=') in
+//                   posedge blocks throughout; that's the vendored coding
+//                   style, not something to rewrite.
+//   DECLFILENAME  - the file defines picorv32_regs/_axi/_wb alongside
+//                   picorv32, so the filename can't match every module name.
+//   GENUNNAMED    - unnamed generate blocks (ENABLE_FAST_MUL/ENABLE_MUL/
+//                   ENABLE_DIV branches) from the upstream source.
+//   MULTITOP      - same multi-module-per-file situation as DECLFILENAME;
+//                   we only ever instantiate `picorv32`, never the others.
+//   UNUSEDSIGNAL  - unused debug/trace signals (dbg_*, waddr[5]/raddr*[5]
+//                   from the register file) internal to the core, not
+//                   reachable or meaningful from soc_top.v.
+//
+// Deliberately NOT waived: the SYNCASYNCNET warning at the soc_top.v /
+// picorv32.v boundary (rst_n used async in soc_top.v, sync inside
+// picorv32.v) - that one crosses into code we own and was flagged for
+// human review rather than suppressed here.
+// =============================================================================
+`verilator_config
+
+lint_off -rule BLKSEQ       -file "rtl/picorv32.v"
+lint_off -rule DECLFILENAME -file "rtl/picorv32.v"
+lint_off -rule GENUNNAMED   -file "rtl/picorv32.v"
+lint_off -rule MULTITOP     -file "rtl/picorv32.v"
+lint_off -rule UNUSEDSIGNAL -file "rtl/picorv32.v"

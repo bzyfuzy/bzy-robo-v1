@@ -15,6 +15,7 @@
 //     direction. Any other (e.g. a skipped state from noise) is ignored -
 //     COUNT holds rather than corrupts.
 // =============================================================================
+`timescale 1ns / 1ps
 `default_nettype none
 
 module quad_enc (
@@ -25,7 +26,11 @@ module quad_enc (
     input  wire        sel,          // this peripheral is addressed
     input  wire [3:0]  wstrb,        // byte write strobes (0 = read)
     input  wire [3:0]  addr,         // word-aligned offset within peripheral
+    // CTRL is a 1-bit register (CLEAR) on the standard 32-bit-wdata bus, so
+    // wdata[31:1] is never read here - expected, not a bug.
+    /* verilator lint_off UNUSEDSIGNAL */
     input  wire [31:0] wdata,
+    /* verilator lint_on UNUSEDSIGNAL */
     output reg  [31:0] rdata,
 
     input  wire        enc_a,        // raw encoder A phase (async)

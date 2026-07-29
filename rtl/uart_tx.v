@@ -7,6 +7,7 @@
 //
 // DIV = clk_freq / baud. e.g. 50 MHz / 115200 = 434.
 // =============================================================================
+`timescale 1ns / 1ps
 `default_nettype none
 
 module uart_tx #(
@@ -16,9 +17,16 @@ module uart_tx #(
     input  wire        rst_n,
 
     input  wire        sel,
+    // DATA is a single byte on the standard 4-bit-wstrb/32-bit-wdata bus:
+    // only wstrb[0] gates the write and only wdata[7:0] is the byte, so
+    // wstrb[3:1] and wdata[31:8] are never read - expected, not a bug.
+    /* verilator lint_off UNUSEDSIGNAL */
     input  wire [3:0]  wstrb,
+    /* verilator lint_on UNUSEDSIGNAL */
     input  wire [3:0]  addr,
+    /* verilator lint_off UNUSEDSIGNAL */
     input  wire [31:0] wdata,
+    /* verilator lint_on UNUSEDSIGNAL */
     output reg  [31:0] rdata,
 
     output reg         tx

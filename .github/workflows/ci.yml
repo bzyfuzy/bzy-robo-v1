@@ -5,6 +5,19 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Verilator
+        run: sudo apt-get update && sudo apt-get install -y verilator
+
+      - name: Verilator lint (zero warnings required)
+        run: |
+          verilator --lint-only -Wall verilator.vlt rtl/soc_top.v rtl/pwm.v \
+                    rtl/uart_tx.v rtl/quad_enc.v rtl/timer.v rtl/picorv32.v
+
   sim:
     runs-on: ubuntu-latest
     steps:

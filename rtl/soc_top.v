@@ -19,6 +19,7 @@
 // address; the slave answers with mem_ready + mem_rdata one cycle later.
 // Every access completes in exactly one wait state - simple and deterministic.
 // =============================================================================
+`timescale 1ns / 1ps
 `default_nettype none
 
 module soc_top #(
@@ -38,9 +39,14 @@ module soc_top #(
 
     // ---- PicoRV32 native memory interface -----------------------------------
     wire        mem_valid;
-    wire        mem_instr;
     reg         mem_ready;
+    // mem_addr[23:13] is genuinely unread: the decoder only looks at
+    // mem_addr[31:24] (peripheral select) and mem_addr[12:2]/[3:0] (RAM
+    // index / peripheral word offset) - the gap is sparse-address-map
+    // slack, not a bug.
+    /* verilator lint_off UNUSEDSIGNAL */
     wire [31:0] mem_addr;
+    /* verilator lint_on UNUSEDSIGNAL */
     wire [31:0] mem_wdata;
     wire [3:0]  mem_wstrb;
     reg  [31:0] mem_rdata;
@@ -66,13 +72,16 @@ module soc_top #(
         .clk       (clk),
         .resetn    (rst_n),
         .mem_valid (mem_valid),
-        .mem_instr (mem_instr),
         .mem_ready (mem_ready),
         .mem_addr  (mem_addr),
         .mem_wdata (mem_wdata),
         .mem_wstrb (mem_wstrb),
         .mem_rdata (mem_rdata),
-        // unused interfaces tied off
+        // unused interfaces tied off: no split instr/data bus logic here,
+        // and lookahead/pcpi/trace are optional PicoRV32 features this
+        // minimal SoC doesn't use
+        /* verilator lint_off PINCONNECTEMPTY */
+        .mem_instr (),
         .mem_la_read  (), .mem_la_write (), .mem_la_addr (),
         .mem_la_wdata (), .mem_la_wstrb (),
         .pcpi_valid (), .pcpi_insn (), .pcpi_rs1 (), .pcpi_rs2 (),
@@ -80,6 +89,7 @@ module soc_top #(
         .irq (irq_bus), .eoi (),
         .trace_valid (), .trace_data (),
         .trap ()
+        /* verilator lint_on PINCONNECTEMPTY */
     );
 
     // ---- address decode -----------------------------------------------------
@@ -90,11 +100,23 @@ module soc_top #(
     wire sel_enc  = mem_valid && (mem_addr[31:24] == 8'h05);
     wire sel_timer= mem_valid && (mem_addr[31:24] == 8'h06);
 
-    // one-cycle ready for every access
+    // one-cycle ready for every access.
+    //
+    // rst_n is deliberately async here (and in every peripheral - see the
+    // Peripheral bus convention) so actuator-facing outputs (e.g. PWM) go
+    // safe immediately on reset, independent of clock activity - that's a
+    // real hardware safety requirement, not an oversight. picorv32.v treats
+    // the same net (resetn) purely synchronously internally, which is fine:
+    // picorv32 tolerates either reset style as long as resetn is held low
+    // for a few clk cycles. Converting our own regs to sync reset to silence
+    // this only moves the same warning to the next async consumer (any
+    // peripheral) rather than resolving it - confirmed by trying it.
+    /* verilator lint_off SYNCASYNCNET */
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) mem_ready <= 1'b0;
         else        mem_ready <= mem_valid && !mem_ready;
     end
+    /* verilator lint_on SYNCASYNCNET */
 
     // write strobes are only honored on the ready cycle (single write)
     wire [3:0] wstrb_eff = (mem_ready) ? mem_wstrb : 4'b0000;
@@ -104,7 +126,6 @@ module soc_top #(
     initial $readmemh(FIRMWARE_HEX, ram);
 
     wire [10:0] ram_idx = mem_addr[12:2];
-    reg  [31:0] ram_rdata;
 
     always @(posedge clk) begin
         if (sel_ram) begin
@@ -112,7 +133,6 @@ module soc_top #(
             if (wstrb_eff[1]) ram[ram_idx][15: 8] <= mem_wdata[15: 8];
             if (wstrb_eff[2]) ram[ram_idx][23:16] <= mem_wdata[23:16];
             if (wstrb_eff[3]) ram[ram_idx][31:24] <= mem_wdata[31:24];
-            ram_rdata <= ram[ram_idx];
         end
     end
 

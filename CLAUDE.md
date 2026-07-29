@@ -86,8 +86,14 @@ bits are write-1-to-clear from the ISR, never auto-clearing on read.
 
 Lint (run before every commit; zero warnings is the bar):
 
-    verilator --lint-only -Wall rtl/soc_top.v rtl/pwm.v rtl/uart_tx.v \
-              rtl/quad_enc.v rtl/timer.v
+    verilator --lint-only -Wall verilator.vlt rtl/soc_top.v rtl/pwm.v \
+              rtl/uart_tx.v rtl/quad_enc.v rtl/timer.v rtl/picorv32.v
+
+`rtl/picorv32.v` must be included (soc_top.v instantiates it). `verilator.vlt`
+(repo root) waives picorv32.v's pre-existing vendored-style warnings by file
+path only - it has zero effect on any file we own, so a new warning in our
+own RTL still fails this command. See the header of that file for exactly
+which categories are waived and why.
 
 Full-SoC simulation (no RISC-V toolchain needed):
 
@@ -141,15 +147,25 @@ verification state.
 
 ## Verification ladder (build in this order)
 
-0. Verilator lint clean (now) — then keep it clean. NOT yet clean: the
-   documented lint command omits `rtl/picorv32.v` (fails to find the
-   `picorv32` module); adding it back surfaces ~72 pre-existing warnings,
-   almost all inside the vendored file itself. Unresolved — flagged to the
-   user, lint is deliberately left out of CI (below) until decided.
-1. CI workflow: sims on every push (GitHub Actions) — done
-   (`.github/workflows/ci.yml`: tb_soc integration + tb_quad_enc unit,
-   each gated on `RESULT: PASS`). Lint step intentionally not wired in yet
-   (see rung 0).
+0. Verilator lint clean — done (2026-07-29). `rtl/picorv32.v` is now in the
+   documented command; `verilator.vlt` waives its pre-existing vendored-style
+   warnings (BLKSEQ, DECLFILENAME, GENUNNAMED, MULTITOP, UNUSEDSIGNAL) by
+   file path only. Three real issues in our own files were fixed instead of
+   waived: a dead `mem_instr` wire and dead `ram_rdata` reg in soc_top.v, and
+   a dead `frame_start` wire in pwm.v. Three more got scoped, commented
+   waivers for expected-not-buggy port-width mismatches inherent to the
+   uniform 32-bit bus convention (soc_top.v's `mem_addr[23:13]` sparse-decode
+   gap, uart_tx.v's `wstrb[3:1]`/`wdata[31:8]`, quad_enc.v's `wdata[31:1]`).
+   One cross-boundary SYNCASYNCNET (`rst_n` async in soc_top.v/peripherals,
+   sync inside picorv32.v) was waived only after trying the real fix
+   (converting soc_top.v's own regs to sync reset) and confirming it just
+   relocates the same warning to the peripherals — full elimination would
+   require making every peripheral sync-reset, which breaks the
+   actuator-safety rationale for the peripheral bus convention's async-reset
+   rule, so the mismatch is inherent to the architecture, not a bug.
+1. CI workflow: lint + all sims on every push (GitHub Actions) — done
+   (`.github/workflows/ci.yml`: verilator lint gated on zero warnings, plus
+   tb_soc integration + tb_quad_enc unit, each gated on `RESULT: PASS`).
 2. Run the existing integration tb — confirm encoder + timer PASS — done
    (2026-07-29, see Verification status table)
 3. Self-checking UART test — exact byte sequence

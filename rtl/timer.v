@@ -18,6 +18,7 @@
 //     to keep ticking; STATUS.IRQ is a software-visible mirror for polling
 //     or for cross-checking that the ISR actually ran.
 // =============================================================================
+`timescale 1ns / 1ps
 `default_nettype none
 
 module timer (
