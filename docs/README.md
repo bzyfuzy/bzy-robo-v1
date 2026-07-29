@@ -11,6 +11,7 @@ address decode, bus protocol, and overall SoC layout, see the top-level
 | 0x0400_0000 | GPIO               | [gpio.md](gpio.md) |
 | 0x0500_0000 | Quadrature encoder | [quad_enc.md](quad_enc.md) |
 | 0x0600_0000 | Timer (IRQ)        | [timer.md](timer.md) |
+| 0x0700_0000 | UART RX            | [uart_rx.md](uart_rx.md) |
 
 SoC infrastructure (not memory-mapped):
 

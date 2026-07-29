@@ -11,10 +11,11 @@
 
 #include <stdint.h>
 
-#define PWM_BASE   0x02000000u
-#define UART_BASE  0x03000000u
-#define ENC_BASE   0x05000000u
-#define TIMER_BASE 0x06000000u
+#define PWM_BASE     0x02000000u
+#define UART_BASE    0x03000000u
+#define ENC_BASE     0x05000000u
+#define TIMER_BASE   0x06000000u
+#define UART_RX_BASE 0x07000000u
 
 #define REG(a) (*(volatile uint32_t *)(a))
 #define PWM_CTRL       REG(PWM_BASE + 0x0)
@@ -27,6 +28,8 @@
 #define TIMER_CTRL     REG(TIMER_BASE + 0x0)
 #define TIMER_PERIOD   REG(TIMER_BASE + 0x4)
 #define TIMER_ISR_CYCLES REG(TIMER_BASE + 0x10)
+#define UART_RX_DATA   REG(UART_RX_BASE + 0x0)
+#define UART_RX_STATUS REG(UART_RX_BASE + 0x4)
 
 // ---- PID / plant-facing constants (Q8 fixed point) -------------------------
 #define SHIFT       8
@@ -113,6 +116,55 @@ static void print_hex32(uint32_t v) {
     }
 }
 
+// Sign-and-magnitude, not raw two's complement: '-' then the hex magnitude
+// if negative, otherwise identical to print_hex32.
+static void print_signed_hex32(int32_t v) {
+    if (v < 0) { putc('-'); v = -v; }
+    print_hex32((uint32_t)v);
+}
+
+// ---- command parser: "T+NNN\n" / "T-NNN\n" over UART RX --------------------
+// Decimal digits, multiply-by-10 accumulate - no division needed, matching
+// the no-hardware-divide constraint. Malformed lines are discarded through
+// the next '\n' and echo '?'; a valid line echoes "ok" and sets *cmd_received,
+// permanently retiring the autonomous profile fallback. See docs/control.md.
+enum { PS_IDLE, PS_SIGN, PS_DIGITS, PS_ERROR_SKIP };
+
+static void parse_uart_rx_byte(int *state, int32_t *value, int32_t *sign,
+                               volatile int32_t *target, int *cmd_received) {
+    if (!(UART_RX_STATUS & 1)) return;   // no byte waiting
+    uint8_t b = (uint8_t)UART_RX_DATA;
+
+    switch (*state) {
+    case PS_IDLE:
+        if (b == 'T') { *state = PS_SIGN; *value = 0; }
+        break;
+    case PS_SIGN:
+        if (b == '+')      { *sign = 1;  *state = PS_DIGITS; }
+        else if (b == '-') { *sign = -1; *state = PS_DIGITS; }
+        else                *state = PS_ERROR_SKIP;
+        break;
+    case PS_DIGITS:
+        if (b == '\n') {
+            *target = (*sign < 0) ? -(*value) : *value;
+            *cmd_received = 1;
+            puts("ok\n");
+            *state = PS_IDLE;
+        } else if (b >= '0' && b <= '9') {
+            *value = (*value) * 10 + (int32_t)(b - '0');
+        } else {
+            *state = PS_ERROR_SKIP;
+        }
+        break;
+    case PS_ERROR_SKIP:
+        if (b == '\n') {
+            puts("?\n");
+            *state = PS_IDLE;
+        }
+        break;
+    }
+}
+
 int main(void) {
     PWM_PRESCALE = 49;      // 50 MHz / (49+1) = 1 MHz tick -> 1 us resolution
     PWM_PERIOD   = 20000;   // 20 ms frame = 50 Hz servo rate
@@ -129,21 +181,29 @@ int main(void) {
 
     uint32_t seg = 0;
     uint32_t next_telemetry = TELEMETRY_PERIOD;
+    int parse_state = PS_IDLE;
+    int32_t parse_value = 0, parse_sign = 1;
+    int cmd_received = 0;
     for (;;) {
         uint32_t tc = tick_count;
 
-        if (seg == 0 && tc >= SEG_TICKS) {
-            target = PROFILE[1];
-            seg = 1;
-        } else if (seg == 1 && tc >= 2 * SEG_TICKS) {
-            target = PROFILE[2];
-            seg = 2;
+        parse_uart_rx_byte(&parse_state, &parse_value, &parse_sign,
+                            &target, &cmd_received);
+
+        if (!cmd_received) {
+            if (seg == 0 && tc >= SEG_TICKS) {
+                target = PROFILE[1];
+                seg = 1;
+            } else if (seg == 1 && tc >= 2 * SEG_TICKS) {
+                target = PROFILE[2];
+                seg = 2;
+            }
         }
 
         if (tc >= next_telemetry) {
             next_telemetry += TELEMETRY_PERIOD;
-            puts("P="); print_hex32((uint32_t)ENC_COUNT);
-            puts(" T="); print_hex32((uint32_t)target);
+            puts("P="); print_signed_hex32(ENC_COUNT);
+            puts(" T="); print_signed_hex32(target);
             puts(" D="); print_hex32(PWM_DUTY);
             puts(" C="); print_hex32(isr_duration);
             putc('\n');

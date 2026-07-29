@@ -1,16 +1,21 @@
-# Closed-loop position control (phase A: autonomous profile)
+# Closed-loop position control (phase A + B: autonomous profile, then commands)
 
 An encoder -> PID -> PWM position-control loop running entirely in the
-timer ISR (`docs/timer.md`), driving a step profile (target 0 -> +400 ->
--200 counts) with no host/CPU-external involvement. This is phase A of the
-roadmap's closed-loop demo: autonomous only, no new peripherals - the
-"plant" (motor + encoder) is a behavioral model in `sim/tb_soc.v` for
-verification; there is no real actuator in this phase.
+timer ISR (`docs/timer.md`). Phase A (autonomous): a fixed step profile
+(target 0 -> +400 -> -200 counts) with no host/CPU-external involvement.
+Phase B (this update): a UART RX command protocol (`docs/uart_rx.md`) lets
+a host type `T+NNN`/`T-NNN` setpoints interactively; the autonomous profile
+is now only a *fallback* that runs until the first valid command arrives,
+at which point it's permanently retired for the rest of the session. The
+"plant" (motor + encoder) is still a behavioral model in `sim/tb_soc.v` -
+there is no real actuator in either phase.
 
 RTL/firmware involved: `rtl/timer.v` (ISR_CYCLES), `rtl/soc_top.v`
-(ENABLE_MUL/ENABLE_FAST_MUL), `fw/gen_firmware.py` and `fw/main.c` (the PID),
-`sim/tb_soc.v` (the plant + pass/fail assertions), `fw/control_model.py`
-(the Python cross-check).
+(ENABLE_MUL/ENABLE_FAST_MUL), `rtl/uart_rx.v` (the command channel),
+`fw/gen_firmware.py` and `fw/main.c` (the PID + command parser),
+`sim/tb_soc.v` (the plant + pass/fail assertions, and - as of phase B - the
+"user" that types commands down the RX line), `fw/control_model.py` (the
+Python cross-check for the PID/plant, phase A only).
 
 ## PID design
 
@@ -91,21 +96,63 @@ simulation, not an assumed budget.
 
 ## Profile and telemetry
 
-Target sequence: `0 -> +400 -> -200` counts, one step change every
-`SEG_TICKS = 400` ISR ticks. Each 2000-clk tick is this codebase's
-established "1kHz-style" sim-accelerated convention (`docs/timer.md`): 1
-ISR tick is treated as 1ms of conceptual control-loop time, matching the
-real-hardware `main.c` setting (`TIMER_PERIOD=50000` at 50MHz) proportionally
-- so "settle within 300ms" is checked as "settle within 300 ISR ticks" in
+Autonomous fallback sequence: `0 -> +400 -> -200` counts, one step change
+every `SEG_TICKS = 400` ISR ticks - active only until the first valid
+command arrives (see the command protocol below), at which point it's
+retired for good. Each 2000-clk tick is this codebase's established
+"1kHz-style" sim-accelerated convention (`docs/timer.md`): 1 ISR tick is
+treated as 1ms of conceptual control-loop time, matching the real-hardware
+`main.c` setting (`TIMER_PERIOD=50000` at 50MHz) proportionally - so
+"settle within 300ms" is checked as "settle within 300 ISR ticks" in
 `sim/tb_soc.v`, not 300ms of simulated wall-clock time.
 
 Telemetry prints roughly every 100 ticks over UART, hex-only (no `/` or
-`%`- neither firmware has hardware division; `ENABLE_DIV` stays 0):
+`%` - neither firmware has hardware division; `ENABLE_DIV` stays 0):
 
     P=xxxxxxxx T=xxxxxxxx D=xxxxxxxx C=xxxxxxxx\n
 
-`P`=position (ENC.COUNT, raw 32-bit two's complement), `T`=target,
-`D`=commanded PWM duty, `C`=last ISR's measured duration in cycles.
+`P`=position (ENC.COUNT), `T`=target, `D`=commanded PWM duty (always
+non-negative, plain hex), `C`=last ISR's measured duration in cycles
+(always non-negative, plain hex). `P`/`T` use **sign-and-magnitude**, not
+raw two's complement: a negative value prints as `-` followed by the hex
+magnitude (e.g. position -150 prints `-00000096`, not `FFFFFF6A`) - much
+more readable when interactively typing setpoints and reading the response
+back. This was a deliberate fix: the original phase-A telemetry printed
+raw two's complement for negative positions/targets, which is technically
+correct but unpleasant to read by eye; both firmwares' print routine
+(`emit_print_signed_hex_word` / `print_signed_hex32`) now check the sign,
+emit `-`, negate, then print the magnitude with the same plain-hex routine.
+
+## Command protocol (phase B): `T+NNN` / `T-NNN`
+
+One line per command, terminated by `\n`:
+
+    T+300\n     -> sets target = 300, echoes "ok\n"
+    T-150\n     -> sets target = -150, echoes "ok\n"
+    Tx9\n       -> malformed (bad sign character), echoes "?\n", target unchanged
+
+Grammar: `T`, then exactly one sign character (`+` or `-`), then one or
+more decimal digits, then `\n`. Digits accumulate via multiply-by-10 (no
+division needed - `value = value*10 + digit`, matching the no-hardware-
+divide constraint everywhere else in this firmware). The parser
+(`emit_...` in `fw/gen_firmware.py`'s main loop / `parse_uart_rx_byte` in
+`fw/main.c`) is a small state machine: `IDLE -> SIGN -> DIGITS`, with any
+unexpected byte along the way dropping into `ERROR_SKIP` (discard
+everything through the next `\n`, then echo `?`) rather than getting stuck
+or silently misinterpreting a later byte as the start of a new command.
+
+Known simplification: a line with a sign but zero digits before `\n` (e.g.
+`T+\n`) is accepted as target 0 rather than treated as malformed - not
+exercised by the test suite and not worth the extra state (a digit-count
+check) for a demo command protocol. Overflow of the decimal accumulator
+for a pathologically long digit string is likewise not guarded - both are
+fine for a hand-typed setpoint command, not a hardened parser.
+
+Once a valid command is accepted, `CMD_RECEIVED` (or C's `cmd_received`)
+latches permanently - the autonomous profile-stepping code checks it every
+loop iteration and simply never fires again once set. There is no way to
+re-enable the autonomous profile once a command has been sent; the only
+way to change the target from then on is another command.
 
 ## System assertions (`sim/tb_soc.v`)
 
@@ -129,13 +176,42 @@ integer boundary - drives one real Gray-code quadrature transition on
 `PLANT_SHIFT=4` (lag time constant), `VEL_GAIN_SHIFT=7` (duty-error-to-
 velocity scale), `POS_FRAC_ONE=256` (fixed-point: 256 units = 1 count).
 
-Pass criteria, gating `RESULT: PASS`/`FAIL`: each profile step settles to
-within **+-8 counts** of target within **300 ISR ticks**, with **overshoot
-under 25%** of the step size. "Settled" means the *true* settle point - the
+Pass criteria, gating `RESULT: PASS`/`FAIL`: each step settles to within
+**+-8 counts** of target within **300 ISR ticks**, with **overshoot under
+25%** of the step size. "Settled" means the *true* settle point - the
 earliest tick from which every later sample (through the end of the
-400-tick segment) stays in tolerance, not just the first tick that happens
-to touch the band in passing (a naive first-touch check can trigger while
-the system is still swinging through the target on its way to overshoot).
+400-tick monitoring window) stays in tolerance, not just the first tick
+that happens to touch the band in passing (a naive first-touch check can
+trigger while the system is still swinging through the target on its way
+to overshoot).
+
+As of phase B, `sim/tb_soc.v`'s default run exercises the *interactive*
+path, not the autonomous profile: it waits for segment 0 (target 0,
+trivially already there) to nominally settle, then types real serial
+commands down `uart_rxd` at realistic baud (`UART_DIV`-derived, the same
+divider `uart_tx` uses) and checks the loop's response to each:
+
+1. `T+300\n` - accepted, chases from 0 to +300
+2. `T-150\n` - accepted, chases from +300 to -150
+3. `Tx9\n` - rejected, target stays at -150 (checked directly: position
+   stays within tolerance of -150 for 60 more ticks after the `?` response)
+
+Because a command arrives well before the autonomous profile's tick-400
+transition would fire, the `0 -> +400 -> -200` fallback path itself is
+*not* re-exercised by this run - it was verified in the phase-A run
+(settle 143/195 ticks, overshoot 1.5%/0.8%) before phase B's command
+protocol existed, and the RTL/firmware logic implementing it is unchanged,
+just permanently bypassed once `CMD_RECEIVED` latches. Measured numbers
+from the phase-B run this design was verified against:
+
+| Command | target | settle_tick | overshoot | final position |
+|---|---|---|---|---|
+| `T+300` | 300  | 117 | 2.0% | 302  |
+| `T-150` | -150 | 156 | 1.1% | -151 |
+
+Both comfortably inside the 300-tick / 25%-overshoot budgets, using the
+exact same PID gains as phase A - no retuning was needed for the smaller
+step sizes (+300/-450 vs. the phase-A profile's +400/-600).
 
 ## Cross-check procedure (`fw/control_model.py`)
 

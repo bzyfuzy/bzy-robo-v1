@@ -39,7 +39,7 @@ when"), and any move is its own commit with zero functional changes.
       memory/         # create when: RAM/scratchpads leave soc_top.v
       top/            # create at next restructure: soc_top.v
     tb/
-      unit/           # exists: tb_quad_enc.v, tb_timer.v; add per-peripheral as written
+      unit/           # exists: tb_quad_enc.v, tb_timer.v, tb_uart_rx.v; add per-peripheral as written
       integration/    # create at next restructure: tb_soc.v
     fw/
       include/        # create when: >1 header (register defs split out)
@@ -66,11 +66,14 @@ when"), and any move is its own commit with zero functional changes.
 | 0x0400_0000 | GPIO               | 0x0 LEDs (8-bit)                                 |
 | 0x0500_0000 | Quadrature encoder | 0x0 COUNT (ro, signed 32), 0x4 CTRL (bit0 clear) |
 | 0x0600_0000 | Timer (IRQ)        | 0x0 CTRL, 0x4 PERIOD, 0x8 COUNT, 0xC STATUS, 0x10 ISR_CYCLES (ro, free-running) |
-| 0x0700_0000 | (next: UART RX)    |                                                  |
+| 0x0700_0000 | UART RX            | 0x0 DATA (ro, pops 8-deep FIFO), 0x4 STATUS (bit0 avail, bit1 overflow W1C, bit2 framing W1C) |
 
 Timer is the first peripheral with a 5th register (`ISR_CYCLES` @ 0x10), so
 its `addr` port is 5 bits, not the usual 4 — see the Peripheral bus
-convention below and `docs/timer.md`.
+convention below and `docs/timer.md`. UART RX is the first peripheral with
+a read-side-effect register (`DATA` pops the FIFO), so it takes an extra
+`bus_ready` input (wired to `soc_top.v`'s `mem_ready`) to qualify the pop
+to one cycle — see `docs/uart_rx.md`.
 
 Firmware layout convention: reset code at 0x0, IRQ handler at 0x1000 —
 `gen_firmware.py` and `sections.lds` must both respect this.
@@ -94,6 +97,15 @@ A peripheral needing a 5th register widens `addr` for its own instantiation
 only (`timer.v` is the first: 5 bits, reaching 0x10 — see the memory map
 above). This is a per-peripheral exception, not a convention change.
 
+Reads are otherwise a plain combinational mux — no side effect, so timing
+doesn't matter. A peripheral whose read *does* have a side effect (`DATA`
+popping `uart_rx.v`'s FIFO is the first) needs an extra `bus_ready` input
+wired to `soc_top.v`'s `mem_ready`, since `sel`/`addr` stay asserted for
+two cycles per access (the setup cycle and the ready cycle) and popping on
+the raw `sel && addr==...` condition would fire twice — see
+`docs/uart_rx.md`. Another per-peripheral exception, not a convention
+change.
+
 Async active-low `rst_n` — fed from `rst_sync.v`'s synchronized output, not
 the raw external pin (see `docs/reset.md`). External async inputs (encoder phases, future
 sensor lines) pass through 2FF synchronizers before any logic. Outputs
@@ -107,7 +119,8 @@ bits are write-1-to-clear from the ISR, never auto-clearing on read.
 Lint (run before every commit; zero warnings is the bar):
 
     verilator --lint-only -Wall verilator.vlt rtl/soc_top.v rtl/rst_sync.v \
-              rtl/pwm.v rtl/uart_tx.v rtl/quad_enc.v rtl/timer.v rtl/picorv32.v
+              rtl/pwm.v rtl/uart_tx.v rtl/uart_rx.v rtl/quad_enc.v \
+              rtl/timer.v rtl/picorv32.v
 
 `rtl/picorv32.v` must be included (soc_top.v instantiates it). `verilator.vlt`
 (repo root) waives picorv32.v's pre-existing vendored-style warnings by file
@@ -120,7 +133,7 @@ Full-SoC simulation (no RISC-V toolchain needed):
     cd sim
     python3 ../fw/gen_firmware.py
     iverilog -g2005-sv -o tb_soc.vvp tb_soc.v ../rtl/soc_top.v \
-             ../rtl/rst_sync.v ../rtl/pwm.v ../rtl/uart_tx.v \
+             ../rtl/rst_sync.v ../rtl/pwm.v ../rtl/uart_tx.v ../rtl/uart_rx.v \
              ../rtl/quad_enc.v ../rtl/timer.v ../rtl/picorv32.v
     vvp tb_soc.vvp            # add +trace for tb_soc.vcd
 
@@ -138,8 +151,11 @@ only when a board is chosen, `asic/` only when an ASIC artifact exists.
 1. Every peripheral has (a) a unit testbench covering edge cases (for
    quad_enc: all 8 legal transitions, illegal skips, clear, signed
    overflow, bounce; for timer: period accuracy, IRQ assertion timing,
-   status clear, disable mid-count) and (b) a monitor in the integration
-   tb that verifies waveform-level behavior — not just register readback.
+   status clear, disable mid-count; for uart_rx: single bytes, back-to-back
+   at full line rate, FIFO fill-then-overflow, framing error, a glitch
+   shorter than half a bit, concurrent pop-while-receiving) and (b) a
+   monitor in the integration tb that verifies waveform-level behavior —
+   not just register readback.
 2. Integration coverage must include the program-visible path: firmware
    reads the peripheral over the bus and reports via UART/GPIO.
    Hierarchical peeks (`dut.u_enc.count`) are allowed in unit tbs, not as
@@ -160,8 +176,10 @@ only when a board is chosen, `asic/` only when an ASIC artifact exists.
 | ----------------------------- | ------- | -------------------------- |
 | Baseline (PWM+UART+GPIO boot) | done    | yes (original baseline; `sim/tb_soc.v`'s firmware no longer touches GPIO as of the closed-loop demo below, so its LED-mirror check was retired along with it — GPIO/LEDs themselves are unchanged and untested by the current integration tb) |
 | Quadrature encoder            | written | yes (unit tb `tb/unit/tb_quad_enc.v`, 24 checks; also driven live by the closed-loop plant in `sim/tb_soc.v` now — see below) |
-| Timer + IRQ                   | written | yes (unit tb `tb/unit/tb_timer.v`, 55 checks, incl. the `>=` fix + `ISR_CYCLES`; integration: `sim/tb_soc.v` `period_errors=0` over 1200 ticks) |
-| Closed-loop position control (phase A) | written | yes (2026-07-29, `sim/tb_soc.v`: both profile steps settle well inside the 300-tick budget with low overshoot — see below and `docs/control.md`) |
+| Timer + IRQ                   | written | yes (unit tb `tb/unit/tb_timer.v`, 55 checks, incl. the `>=` fix + `ISR_CYCLES`; integration: `sim/tb_soc.v` `period_errors=0`) |
+| UART RX                       | written | yes (unit tb `tb/unit/tb_uart_rx.v`, 42 checks, incl. FIFO overflow/framing/glitch/concurrent-pop; integration: `sim/tb_soc.v` types real commands down the line at realistic baud) |
+| Closed-loop position control (phase A: autonomous) | written | yes (`sim/tb_soc.v` run prior to phase B: both profile steps settled well inside the 300-tick budget with low overshoot — see `docs/control.md`; logic unchanged, no longer exercised by the default run once phase B retires it) |
+| Closed-loop position control (phase B: UART commands) | written | yes (2026-07-29, `sim/tb_soc.v`: `T+300`/`T-150` both settle well inside the 300-tick budget with low overshoot, `Tx9` correctly rejected with target unchanged — see below and `docs/control.md`) |
 
 Update this table the moment a sim actually runs. "Hand-traced" is not a
 verification state.
@@ -257,9 +275,40 @@ verification state.
    carries the same PID logic for real hardware, but the CI environment
    has no riscv32 toolchain, so it's written and reasoned through but not
    compiled here — hand off `cd fw && make` to whoever has the toolchain.
-   Next (phase B, not yet): a real actuator/plant instead of the
-   behavioral model, host-commanded setpoints instead of the fixed
-   profile.
+10. UART RX (0x0700_0000) + closed-loop position control, phase B
+    (interactive setpoints) — done (2026-07-29, `docs/uart_rx.md` +
+    `docs/control.md`): 16x-oversampled 8N1 receiver, 2FF-synchronized
+    `rx` pin, 8-deep FIFO, drop-newest overflow policy (never corrupts
+    queued bytes), sticky OVERFLOW/FERR (W1C, same convention as timer's
+    STATUS.IRQ). `DATA`'s read pops the FIFO — the first peripheral read
+    with a side effect, needing a `bus_ready`-qualified strobe (see the
+    Peripheral bus convention) since `sel` stays asserted for two cycles
+    per bus access and a naive read-triggered pop would double-fire.
+    Unit tb (`tb/unit/tb_uart_rx.v`, 42 checks) mutation-tested: breaking
+    the start-bit center check (sampling at tick 0 instead of 8) was
+    first *not* caught directly by the glitch-rejection test — the
+    settle window after the glitch was too short to observe the mutated
+    RTL's eventual spurious byte, so the mutation only surfaced as
+    cross-test contamination in a later test. Fixed by widening that
+    window to a full frame period; re-confirmed the mutation is now
+    caught directly at the glitch test itself.
+    Firmware: a command parser (`T+NNN`/`T-NNN\n`, decimal digits via
+    multiply-by-10 accumulate — no division needed) in the main loop,
+    identical in `fw/gen_firmware.py` and `fw/main.c`; the autonomous
+    profile becomes a fallback that's permanently retired the instant a
+    valid command is accepted. Telemetry's `P=`/`T=` fields were also
+    fixed to sign-and-magnitude (`-` then hex magnitude) instead of raw
+    two's complement — much more readable when interactively typing
+    setpoints. `sim/tb_soc.v` now "becomes the user": types `T+300\n`,
+    `T-150\n`, and one malformed `Tx9\n` down `uart_rxd` at realistic
+    baud (`UART_DIV=32`, shared with `uart_tx`) and verifies the loop
+    chases each accepted setpoint (settle 117/156 ticks, overshoot
+    2.0%/1.1%, both well inside budget) while the malformed command is
+    rejected (`?`) without moving the target. A real RTL bug was caught
+    building this: `uart_rx.v`'s `ST_STOP` state never incremented its
+    sample-tick counter, so it could never detect the stop bit and got
+    stuck forever - found via hierarchical-peek diagnostics on the very
+    first test run, not assumed away.
 
 ## Peripheral roadmap
 
@@ -268,11 +317,14 @@ verification state.
    see Verification status table)
 2. ~~Timer + interrupt (0x0600_0000)~~ — RTL done (irq[3] every PERIOD
    clks, `ISR_CYCLES` @ 0x10, `docs/timer.md`); sim verified. ~~Closed-loop
-   position demo (encoder -> PID -> PWM in the ISR)~~ — phase A done
-   (autonomous profile, behavioral plant; see ladder item 9 and
-   `docs/control.md`). Next: phase B (real actuator/plant, host-commanded
-   setpoints)
-3. UART RX — start-bit detect, mid-bit sampling, small FIFO
+   position demo (encoder -> PID -> PWM in the ISR)~~ — phase A (autonomous
+   profile, behavioral plant) and phase B (UART RX, interactive
+   setpoints) both done; see ladder items 9-10 and `docs/control.md`.
+   Next (phase C, not yet): a real actuator/plant instead of the
+   behavioral model.
+3. ~~UART RX (0x0700_0000)~~ — RTL done (16x oversample, start-bit
+   center-detect + glitch reject, 8-deep FIFO, `docs/uart_rx.md`); sim
+   verified (unit tb + integration, see Verification status table)
 4. I2C master — MPU-6050 IMU
 5. SPI master
 6. Watchdog — unfed => PWM forced safe in hardware

@@ -82,6 +82,7 @@ def _b_type(rs1, rs2, off, funct3):
     return (imm12 << 31) | (imm10_5 << 25) | (reg(rs2) << 20) | (reg(rs1) << 15) | \
            (funct3 << 12) | (imm4_1 << 8) | (imm11 << 7) | 0x63
 
+def beq(rs1, rs2, off): return _b_type(rs1, rs2, off, 0b000)
 def bne(rs1, rs2, off): return _b_type(rs1, rs2, off, 0b001)
 def blt(rs1, rs2, off): return _b_type(rs1, rs2, off, 0b100)
 
@@ -146,7 +147,7 @@ def emit_jal(rd, target_label):
 
 def emit_branch(kind, rs1, rs2, target_label):
     idx = emit(0)
-    enc = {'bne': bne, 'blt': blt}[kind]
+    enc = {'beq': beq, 'bne': bne, 'blt': blt}[kind]
     def patch():
         off = (labels[target_label] - idx) * 4
         prog[idx] = enc(rs1, rs2, off)
@@ -209,19 +210,35 @@ X0 = 0
 # boot-only scratch (never touched again once interrupts are unmasked)
 MASK = 1
 
-# boot + main-loop shared scratch/pointers (ISR never touches these)
-UART   = 6    # UART base, 0x0300_0000
+# boot + main-loop shared scratch/pointers (ISR never touches these; an
+# interrupt can land between any two of these instructions, so anything the
+# main loop is mid-use of here would otherwise get clobbered)
+UART   = 6    # UART TX base, 0x0300_0000
 TMP    = 7    # general scratch
-TEN    = 9    # constant 10, hoisted once for hex-nibble ASCII conversion
+TEN    = 9    # constant 10, hoisted once for hex-nibble ASCII conversion and
+              # for the command parser's decimal-digit range check
 CHR    = 11   # character-to-send scratch
 SEG    = 15   # main-persistent: which profile segment we're in (0,1,2)
 NEXT_T = 16   # main-persistent: next telemetry tick_count threshold
+MTMP   = 5    # general scratch #2
+MTMP2  = 8    # general scratch #3
+
+# command-parser state (main-loop-only, persists across loop iterations
+# exactly like SEG/NEXT_T above)
+PARSE_STATE  = 3    # 0=IDLE 1=SIGN 2=DIGITS 3=ERROR_SKIP
+PARSE_VALUE  = 4    # decimal accumulator (multiply-by-10, no division needed)
+PARSE_SIGN   = 10   # +1 or -1
+CMD_RECEIVED = 12   # latches to 1 on the first accepted command, forever
+                     # after disabling the autonomous profile fallback
 
 # boot-loaded constant pointers: set once before interrupts are unmasked,
 # read (never reassigned) by both the ISR and the main loop afterward
-ENC_BASE   = 24   # 0x0500_0000
-PWM_BASE   = 25   # 0x0200_0000
-TIMER_BASE = 26   # 0x0600_0000
+ENC_BASE     = 24   # 0x0500_0000
+PWM_BASE     = 25   # 0x0200_0000
+TIMER_BASE   = 26   # 0x0600_0000
+UART_RX_BASE = 2    # 0x0700_0000 - main-loop-only (the ISR never touches
+                     # UART RX), but still boot-loaded once alongside the
+                     # other base pointers for consistency
 DATA_BASE  = 29   # shared data block, right after the ISR (see below)
 
 # ISR-only scratch (freely reused within one ISR call; never touched by
@@ -267,6 +284,48 @@ SEG_TICKS = 400          # ticks (== ISR periods) per profile segment
 TELEMETRY_PERIOD = 100   # ticks between telemetry prints
 
 # =============================================================================
+# print helpers (main-loop-only: MTMP/MTMP2/TEN/UART/CHR, never touched by
+# the ISR). Defined here, called from both the command parser's ok/? echo
+# and the telemetry block below.
+# =============================================================================
+def emit_print_hex_word(val_reg):
+    """Prints val_reg as 8 uppercase hex ASCII digits, MSB first."""
+    for shamt in (28, 24, 20, 16, 12, 8, 4, 0):
+        emit(srli(MTMP, val_reg, shamt))
+        emit(andi(MTMP, MTMP, 0xF))
+        after = uniq("hexdigit_after")
+        emit_branch('blt', MTMP, TEN, after)
+        emit(addi(MTMP, MTMP, 7))        # 'A'-'9'-1 adjustment
+        label(after)
+        emit(addi(MTMP, MTMP, 0x30))     # '0' ascii base
+        emit_wait_uart_send(MTMP, UART, MTMP2)
+
+def emit_print_signed_hex_word(val_reg):
+    """Sign-and-magnitude, not raw two's complement: '-' then the hex
+    magnitude if negative, otherwise identical to emit_print_hex_word.
+    Mutates val_reg in place (negates it) - callers only ever pass a
+    freshly-loaded scratch register (TMP), never a persistent one."""
+    neg = uniq("signed_hex_neg")
+    pos = uniq("signed_hex_pos")
+    emit_branch('blt', val_reg, X0, neg)   # val_reg < 0 -> print '-' + magnitude
+    emit_jal(X0, pos)
+    label(neg)
+    emit_print_char(ord('-'))
+    emit(sub(val_reg, X0, val_reg))         # val_reg = -val_reg
+    label(pos)
+    emit_print_hex_word(val_reg)
+
+def emit_print_char(c):
+    emit(addi(CHR, X0, c))
+    emit_wait_uart_send(CHR, UART, MTMP2)
+
+def emit_print_ok():
+    emit_print_char(ord('o')); emit_print_char(ord('k')); emit_print_char(10)
+
+def emit_print_bad_response():
+    emit_print_char(ord('?')); emit_print_char(10)
+
+# =============================================================================
 # boot: peripheral setup
 # =============================================================================
 emit_li(PWM_BASE, 0x02000000)
@@ -286,6 +345,7 @@ emit(addi(TMP, X0, 1))
 emit(sw(TMP, TIMER_BASE, 0))           # TIMER CTRL = 1 (enable)
 
 emit_li(ENC_BASE, 0x05000000)
+emit_li(UART_RX_BASE, 0x07000000)
 emit_load_const(DATA_BASE, "data_block")   # data_block's address isn't known
                                             # until the ISR (right before it)
                                             # is fully assembled - deferred
@@ -307,19 +367,113 @@ for ch in (ord('O'), ord('K'), 10):
     emit(addi(CHR, X0, ch))
     emit_wait_uart_send(CHR, UART, TMP)
 
-# ---- main loop: profile stepping + hex telemetry ---------------------------
-# MTMP/MTMP2 are main-loop-only scratch (like TMP/CHR/SEG/NEXT_T) - the ISR
-# must never touch them, since an interrupt can land between any two of
-# these instructions and would otherwise clobber a value main is mid-use of.
-MTMP  = 5
-MTMP2 = 8
-
+# ---- main loop: command parsing + profile stepping + hex telemetry --------
 emit(addi(SEG, X0, 0))                       # SEG = 0 (segment 0 == target 0, already set)
 emit(addi(NEXT_T, X0, TELEMETRY_PERIOD))     # NEXT_T = 100
 emit(addi(TEN, X0, 10))                      # TEN = 10, hoisted for hex-nibble compares
+emit(addi(PARSE_STATE, X0, 0))               # PARSE_STATE = IDLE
+emit(addi(CMD_RECEIVED, X0, 0))              # no command yet -> autonomous profile active
 
 label("main_loop")
 emit(lw(TMP, DATA_BASE, D_TICK))             # TMP = tick_count
+
+# -- command parser: accept "T+NNN\n" / "T-NNN\n" over UART RX -----------
+# Processes at most one received byte per loop iteration - plenty, since
+# the main loop iterates far faster than bytes arrive at any real baud.
+# Malformed lines are discarded (through the next '\n') and echo '?'; a
+# valid line echoes "ok" and sets CMD_RECEIVED, permanently disabling the
+# autonomous profile fallback below. See docs/control.md's command
+# protocol section.
+emit(lw(MTMP, UART_RX_BASE, 4))              # STATUS
+emit(andi(MTMP, MTMP, 1))                    # data_available
+uart_rx_skip = uniq("uart_rx_skip")
+emit_branch('beq', MTMP, X0, uart_rx_skip)   # no byte waiting -> skip parser
+emit(lw(MTMP, UART_RX_BASE, 0))               # pop the byte
+
+ps_done = uniq("ps_done")
+
+# --- state 0: IDLE - wait for 'T' ---------------------------------------
+emit(addi(MTMP2, X0, 0))
+ps_not_idle = uniq("ps_not_idle")
+emit_branch('bne', PARSE_STATE, MTMP2, ps_not_idle)
+emit(addi(MTMP2, X0, ord('T')))
+ps_not_T = uniq("ps_not_T")
+emit_branch('bne', MTMP, MTMP2, ps_not_T)
+emit(addi(PARSE_STATE, X0, 1))               # -> SIGN
+emit(addi(PARSE_VALUE, X0, 0))
+label(ps_not_T)                              # not 'T': ignored, stay IDLE
+emit_jal(X0, ps_done)
+label(ps_not_idle)
+
+# --- state 1: SIGN - expect '+' or '-' -----------------------------------
+emit(addi(MTMP2, X0, 1))
+ps_not_sign = uniq("ps_not_sign")
+emit_branch('bne', PARSE_STATE, MTMP2, ps_not_sign)
+emit(addi(MTMP2, X0, ord('+')))
+ps_not_plus = uniq("ps_not_plus")
+emit_branch('bne', MTMP, MTMP2, ps_not_plus)
+emit(addi(PARSE_SIGN, X0, 1))
+emit(addi(PARSE_STATE, X0, 2))               # -> DIGITS
+emit_jal(X0, ps_done)
+label(ps_not_plus)
+emit(addi(MTMP2, X0, ord('-')))
+ps_not_minus = uniq("ps_not_minus")
+emit_branch('bne', MTMP, MTMP2, ps_not_minus)
+emit(addi(PARSE_SIGN, X0, -1))
+emit(addi(PARSE_STATE, X0, 2))
+emit_jal(X0, ps_done)
+label(ps_not_minus)                          # neither '+' nor '-' -> malformed
+emit(addi(PARSE_STATE, X0, 3))               # -> ERROR_SKIP
+emit_jal(X0, ps_done)
+label(ps_not_sign)
+
+# --- state 2: DIGITS - accumulate decimal digits, '\n' finalizes --------
+emit(addi(MTMP2, X0, 2))
+ps_not_digits = uniq("ps_not_digits")
+emit_branch('bne', PARSE_STATE, MTMP2, ps_not_digits)
+emit(addi(MTMP2, X0, 10))                    # '\n'
+ps_not_nl = uniq("ps_not_nl")
+emit_branch('bne', MTMP, MTMP2, ps_not_nl)
+emit_branch('blt', PARSE_SIGN, X0, "cmd_negate_" + ps_not_nl)
+emit_jal(X0, "cmd_store_" + ps_not_nl)
+label("cmd_negate_" + ps_not_nl)
+emit(sub(PARSE_VALUE, X0, PARSE_VALUE))      # apply '-' sign
+label("cmd_store_" + ps_not_nl)
+emit(sw(PARSE_VALUE, DATA_BASE, D_TARGET))   # target = parsed value (atomic store)
+emit(addi(CMD_RECEIVED, X0, 1))
+emit_print_ok()
+emit(addi(PARSE_STATE, X0, 0))               # -> IDLE
+emit_jal(X0, ps_done)
+label(ps_not_nl)
+emit(addi(MTMP2, X0, ord('0')))
+emit(sub(MTMP2, MTMP, MTMP2))                # MTMP2 = digit = byte - '0'
+ps_digit_invalid = uniq("ps_digit_invalid")
+ps_digit_valid = uniq("ps_digit_valid")
+emit_branch('blt', MTMP2, X0, ps_digit_invalid)   # digit < 0 -> not a digit
+emit_branch('blt', MTMP2, TEN, ps_digit_valid)    # digit < 10 -> valid digit
+label(ps_digit_invalid)
+emit(addi(PARSE_STATE, X0, 3))               # -> ERROR_SKIP
+emit_jal(X0, ps_done)
+label(ps_digit_valid)
+emit(mul(PARSE_VALUE, PARSE_VALUE, TEN))     # value = value*10 + digit
+emit(add(PARSE_VALUE, PARSE_VALUE, MTMP2))
+emit_jal(X0, ps_done)
+label(ps_not_digits)
+
+# --- state 3: ERROR_SKIP - discard until '\n', then echo '?' ------------
+emit(addi(MTMP2, X0, 10))
+ps_not_nl2 = uniq("ps_not_nl2")
+emit_branch('bne', MTMP, MTMP2, ps_not_nl2)
+emit_print_bad_response()
+emit(addi(PARSE_STATE, X0, 0))               # -> IDLE
+label(ps_not_nl2)
+
+label(ps_done)
+label(uart_rx_skip)
+
+emit_branch('bne', CMD_RECEIVED, X0, "check_telemetry")  # a command already
+                                              # arrived -> autonomous profile
+                                              # fallback is retired for good
 
 # -- segment 1 transition: tick_count >= SEG_TICKS && SEG==0 --------------
 emit(addi(MTMP, X0, SEG_TICKS))
@@ -346,30 +500,16 @@ emit_branch('blt', TMP, NEXT_T, "main_loop_end")
 emit(addi(NEXT_T, NEXT_T, TELEMETRY_PERIOD))
 
 # ---- telemetry: "P=xxxxxxxx T=xxxxxxxx D=xxxxxxxx C=xxxxxxxx\n" -----------
-def emit_print_hex_word(val_reg):
-    """Prints val_reg as 8 uppercase hex ASCII digits, MSB first. Uses
-    MTMP/MTMP2 as scratch and TEN (hoisted constant, x9) - main-loop-only
-    registers, never touched by the ISR (see MTMP/MTMP2 above)."""
-    for shamt in (28, 24, 20, 16, 12, 8, 4, 0):
-        emit(srli(MTMP, val_reg, shamt))
-        emit(andi(MTMP, MTMP, 0xF))
-        after = uniq("hexdigit_after")
-        emit_branch('blt', MTMP, TEN, after)
-        emit(addi(MTMP, MTMP, 7))        # 'A'-'9'-1 adjustment
-        label(after)
-        emit(addi(MTMP, MTMP, 0x30))     # '0' ascii base
-        emit_wait_uart_send(MTMP, UART, MTMP2)
-
-def emit_print_char(c):
-    emit(addi(CHR, X0, c))
-    emit_wait_uart_send(CHR, UART, MTMP2)
-
+# P=/T= (position/target) use sign-and-magnitude (print_signed_hex_word):
+# a leading '-' then the hex magnitude, not raw two's complement - much
+# more readable when interactively typing setpoints. D=/C= (duty, cycles)
+# are always non-negative, so they keep plain hex.
 emit_print_char(ord('P')); emit_print_char(ord('='))
 emit(lw(TMP, ENC_BASE, 0))
-emit_print_hex_word(TMP)
+emit_print_signed_hex_word(TMP)
 emit_print_char(ord(' ')); emit_print_char(ord('T')); emit_print_char(ord('='))
 emit(lw(TMP, DATA_BASE, D_TARGET))
-emit_print_hex_word(TMP)
+emit_print_signed_hex_word(TMP)
 emit_print_char(ord(' ')); emit_print_char(ord('D')); emit_print_char(ord('='))
 emit(lw(TMP, PWM_BASE, 12))
 emit_print_hex_word(TMP)

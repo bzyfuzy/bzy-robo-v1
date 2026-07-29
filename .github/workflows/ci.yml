@@ -16,8 +16,8 @@ jobs:
       - name: Verilator lint (zero warnings required)
         run: |
           verilator --lint-only -Wall verilator.vlt rtl/soc_top.v \
-                    rtl/rst_sync.v rtl/pwm.v rtl/uart_tx.v rtl/quad_enc.v \
-                    rtl/timer.v rtl/picorv32.v
+                    rtl/rst_sync.v rtl/pwm.v rtl/uart_tx.v rtl/uart_rx.v \
+                    rtl/quad_enc.v rtl/timer.v rtl/picorv32.v
 
   sim:
     runs-on: ubuntu-latest
@@ -36,7 +36,7 @@ jobs:
         run: |
           iverilog -g2005-sv -o tb_soc.vvp tb_soc.v ../rtl/soc_top.v \
                    ../rtl/rst_sync.v ../rtl/pwm.v ../rtl/uart_tx.v \
-                   ../rtl/quad_enc.v ../rtl/timer.v ../rtl/picorv32.v
+                   ../rtl/uart_rx.v ../rtl/quad_enc.v ../rtl/timer.v ../rtl/picorv32.v
           vvp tb_soc.vvp | tee tb_soc.log
           grep -q '^RESULT: PASS' tb_soc.log
 
@@ -53,3 +53,10 @@ jobs:
           iverilog -g2005-sv -o tb_timer.vvp tb_timer.v ../../rtl/timer.v
           vvp tb_timer.vvp | tee tb_timer.log
           grep -q '^RESULT: PASS' tb_timer.log
+
+      - name: Build + run uart_rx unit testbench
+        working-directory: tb/unit
+        run: |
+          iverilog -g2005-sv -o tb_uart_rx.vvp tb_uart_rx.v ../../rtl/uart_rx.v
+          vvp tb_uart_rx.vvp | tee tb_uart_rx.log
+          grep -q '^RESULT: PASS' tb_uart_rx.log

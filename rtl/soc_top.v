@@ -13,7 +13,8 @@
 //   0x0300_0000  UART  (DATA / STATUS)
 //   0x0400_0000  GPIO  (bit per LED)
 //   0x0500_0000  ENC   (COUNT / CTRL)
-//   0x0600_0000  TIMER (CTRL / PERIOD / COUNT / STATUS) -> irq[3]
+//   0x0600_0000  TIMER (CTRL / PERIOD / COUNT / STATUS / ISR_CYCLES) -> irq[3]
+//   0x0700_0000  UART RX (DATA / STATUS)
 //
 // The bus is PicoRV32's native interface: the core raises mem_valid with an
 // address; the slave answers with mem_ready + mem_rdata one cycle later.
@@ -24,7 +25,8 @@
 
 module soc_top #(
     parameter FIRMWARE_HEX = "firmware.hex",
-    parameter UART_DIV     = 434
+    parameter UART_DIV     = 434,
+    parameter UART_RX_OVERSAMPLE_DIV = 2
 )(
     input  wire clk,
     input  wire rst_n,
@@ -34,7 +36,9 @@ module soc_top #(
     output wire [7:0] leds,
 
     input  wire enc_a,
-    input  wire enc_b
+    input  wire enc_b,
+
+    input  wire uart_rxd
 );
 
     // ---- reset synchronizer --------------------------------------------------
@@ -136,6 +140,7 @@ module soc_top #(
     wire sel_gpio = mem_valid && (mem_addr[31:24] == 8'h04);
     wire sel_enc  = mem_valid && (mem_addr[31:24] == 8'h05);
     wire sel_timer= mem_valid && (mem_addr[31:24] == 8'h06);
+    wire sel_uart_rx = mem_valid && (mem_addr[31:24] == 8'h07);
 
     // one-cycle ready for every access
     always @(posedge clk or negedge rst_n_sync) begin
@@ -219,6 +224,22 @@ module soc_top #(
         .irq_pulse (timer_irq_pulse)
     );
 
+    wire [31:0] uart_rx_rdata;
+    uart_rx #(.OVERSAMPLE_DIV(UART_RX_OVERSAMPLE_DIV)) u_uart_rx (
+        .clk       (clk),
+        .rst_n     (rst_n_sync),
+        .sel       (sel_uart_rx),
+        .wstrb     (wstrb_eff),
+        .addr      (mem_addr[3:0]),
+        .wdata     (mem_wdata),
+        .rdata     (uart_rx_rdata),
+        .bus_ready (mem_ready),   // DATA's read pops the FIFO - needs the
+                                   // actual ready-qualified cycle, since sel
+                                   // stays asserted for two cycles per access
+                                   // (see rtl/uart_rx.v / docs/uart_rx.md)
+        .rx        (uart_rxd)
+    );
+
     // ---- read mux (registered, valid on the ready cycle) --------------------
     always @(posedge clk) begin
         case (mem_addr[31:24])
@@ -228,6 +249,7 @@ module soc_top #(
             8'h04:   mem_rdata <= {24'd0, gpio_reg};
             8'h05:   mem_rdata <= enc_rdata;
             8'h06:   mem_rdata <= timer_rdata;
+            8'h07:   mem_rdata <= uart_rx_rdata;
             default: mem_rdata <= 32'h0000_0000;
         endcase
     end
