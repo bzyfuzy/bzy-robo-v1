@@ -1,5 +1,9 @@
 sim/firmware.hex
 sim/*.vvp
 sim/*.vcd
+sim/*.log
 fw/*.elf
 fw/*.hex
+tb/**/*.vvp
+tb/**/*.vcd
+tb/**/*.log

@@ -30,7 +30,7 @@ when"), and any move is its own commit with zero functional changes.
       memory/         # create when: RAM/scratchpads leave soc_top.v
       top/            # create at next restructure: soc_top.v
     tb/
-      unit/           # create at next restructure: per-peripheral testbenches
+      unit/           # exists: tb_quad_enc.v; add per-peripheral as written
       integration/    # create at next restructure: tb_soc.v
     fw/
       include/        # create when: >1 header (register defs split out)
@@ -102,7 +102,8 @@ Add every new RTL file to both command lines above (and keep README in
 sync). C firmware for real hardware: `fw/Makefile` (riscv32 gcc).
 
 Planned restructure (own commit, zero functional changes, update all paths
-here when done): `rtl/peripherals/`, `tb/unit/` + `tb/integration/`,
+here when done): `rtl/peripherals/`, `tb/integration/` (tb_soc.v still lives
+in `sim/`; `tb/unit/` has already started early with per-peripheral tbs),
 `tests/` for CI scripts. Directories follow files, not ambitions — `fpga/`
 only when a board is chosen, `asic/` only when an ASIC artifact exists.
 
@@ -140,13 +141,23 @@ verification state.
 
 ## Verification ladder (build in this order)
 
-0. Verilator lint clean (now) — then keep it clean
-1. CI workflow: lint + all sims on every push (GitHub Actions)
-2. Run the existing integration tb — confirm encoder + timer PASS
+0. Verilator lint clean (now) — then keep it clean. NOT yet clean: the
+   documented lint command omits `rtl/picorv32.v` (fails to find the
+   `picorv32` module); adding it back surfaces ~72 pre-existing warnings,
+   almost all inside the vendored file itself. Unresolved — flagged to the
+   user, lint is deliberately left out of CI (below) until decided.
+1. CI workflow: sims on every push (GitHub Actions) — done
+   (`.github/workflows/ci.yml`: tb_soc integration + tb_quad_enc unit,
+   each gated on `RESULT: PASS`). Lint step intentionally not wired in yet
+   (see rung 0).
+2. Run the existing integration tb — confirm encoder + timer PASS — done
+   (2026-07-29, see Verification status table)
 3. Self-checking UART test — exact byte sequence
 4. Self-checking PWM test — pulse width, period, enable/disable,
    mid-frame DUTY write (must not tear a pulse)
-5. Unit tb for quad_enc, then for timer (see Rule 1 lists)
+5. Unit tb for quad_enc — done (`tb/unit/tb_quad_enc.v`: all 8 legal
+   transitions, all 4 illegal skips, clear, signed overflow/underflow at
+   the 32-bit boundary, contact bounce, reset); timer unit tb still pending
 6. Bus tests — byte strobes, invalid addresses, back-to-back transactions
 7. Firmware-level test — program-visible results over UART, including an
    ISR-counted timer check (ISR increments, main loop reports)

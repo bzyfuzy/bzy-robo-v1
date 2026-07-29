@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  sim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Icarus Verilog
+        run: sudo apt-get update && sudo apt-get install -y iverilog
+
+      - name: Generate firmware
+        run: python3 fw/gen_firmware.py
+        working-directory: sim
+
+      - name: Build + run integration testbench (tb_soc)
+        working-directory: sim
+        run: |
+          iverilog -g2005-sv -o tb_soc.vvp tb_soc.v ../rtl/soc_top.v \
+                   ../rtl/pwm.v ../rtl/uart_tx.v ../rtl/quad_enc.v \
+                   ../rtl/timer.v ../rtl/picorv32.v
+          vvp tb_soc.vvp | tee tb_soc.log
+          grep -q '^RESULT: PASS' tb_soc.log
+
+      - name: Build + run quad_enc unit testbench
+        working-directory: tb/unit
+        run: |
+          iverilog -g2005-sv -o tb_quad_enc.vvp tb_quad_enc.v ../../rtl/quad_enc.v
+          vvp tb_quad_enc.vvp | tee tb_quad_enc.log
+          grep -q '^RESULT: PASS' tb_quad_enc.log
