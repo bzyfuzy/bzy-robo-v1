@@ -37,6 +37,24 @@ module soc_top #(
     input  wire enc_b
 );
 
+    // ---- reset synchronizer --------------------------------------------------
+    // The raw external rst_n feeds only this synchronizer; every register in
+    // the design below (soc_top's own, every peripheral, and the CPU) resets
+    // from rst_n_sync instead. See docs/reset.md for the rationale.
+    wire rst_n_sync;
+    rst_sync u_rst_sync (
+        .clk       (clk),
+        .rst_n_in  (rst_n),
+        .rst_n_out (rst_n_sync)
+    );
+
+    // picorv32 is vendored and treats resetn purely synchronously inside
+    // (no `negedge` in its always blocks), while everything else here uses
+    // rst_n_sync asynchronously (see the Peripheral bus convention). Same
+    // value, but a distinct net for the CPU keeps that intentional style
+    // difference from reading as a cross-wired reset bug.
+    wire cpu_resetn = rst_n_sync;
+
     // ---- PicoRV32 native memory interface -----------------------------------
     wire        mem_valid;
     reg         mem_ready;
@@ -70,7 +88,7 @@ module soc_top #(
         .STACKADDR       (32'h0000_2000)     // top of 8 KB RAM
     ) u_cpu (
         .clk       (clk),
-        .resetn    (rst_n),
+        .resetn    (cpu_resetn),
         .mem_valid (mem_valid),
         .mem_ready (mem_ready),
         .mem_addr  (mem_addr),
@@ -100,23 +118,11 @@ module soc_top #(
     wire sel_enc  = mem_valid && (mem_addr[31:24] == 8'h05);
     wire sel_timer= mem_valid && (mem_addr[31:24] == 8'h06);
 
-    // one-cycle ready for every access.
-    //
-    // rst_n is deliberately async here (and in every peripheral - see the
-    // Peripheral bus convention) so actuator-facing outputs (e.g. PWM) go
-    // safe immediately on reset, independent of clock activity - that's a
-    // real hardware safety requirement, not an oversight. picorv32.v treats
-    // the same net (resetn) purely synchronously internally, which is fine:
-    // picorv32 tolerates either reset style as long as resetn is held low
-    // for a few clk cycles. Converting our own regs to sync reset to silence
-    // this only moves the same warning to the next async consumer (any
-    // peripheral) rather than resolving it - confirmed by trying it.
-    /* verilator lint_off SYNCASYNCNET */
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) mem_ready <= 1'b0;
-        else        mem_ready <= mem_valid && !mem_ready;
+    // one-cycle ready for every access
+    always @(posedge clk or negedge rst_n_sync) begin
+        if (!rst_n_sync) mem_ready <= 1'b0;
+        else             mem_ready <= mem_valid && !mem_ready;
     end
-    /* verilator lint_on SYNCASYNCNET */
 
     // write strobes are only honored on the ready cycle (single write)
     wire [3:0] wstrb_eff = (mem_ready) ? mem_wstrb : 4'b0000;
@@ -140,7 +146,7 @@ module soc_top #(
     wire [31:0] pwm_rdata;
     pwm u_pwm (
         .clk   (clk),
-        .rst_n (rst_n),
+        .rst_n (rst_n_sync),
         .sel   (sel_pwm),
         .wstrb (wstrb_eff),
         .addr  (mem_addr[3:0]),
@@ -152,7 +158,7 @@ module soc_top #(
     wire [31:0] uart_rdata;
     uart_tx #(.DIV(UART_DIV)) u_uart (
         .clk   (clk),
-        .rst_n (rst_n),
+        .rst_n (rst_n_sync),
         .sel   (sel_uart),
         .wstrb (wstrb_eff),
         .addr  (mem_addr[3:0]),
@@ -162,8 +168,8 @@ module soc_top #(
     );
 
     reg [7:0] gpio_reg;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)                          gpio_reg <= 8'd0;
+    always @(posedge clk or negedge rst_n_sync) begin
+        if (!rst_n_sync)                     gpio_reg <= 8'd0;
         else if (sel_gpio && wstrb_eff[0])   gpio_reg <= mem_wdata[7:0];
     end
     assign leds = gpio_reg;
@@ -171,7 +177,7 @@ module soc_top #(
     wire [31:0] enc_rdata;
     quad_enc u_enc (
         .clk   (clk),
-        .rst_n (rst_n),
+        .rst_n (rst_n_sync),
         .sel   (sel_enc),
         .wstrb (wstrb_eff),
         .addr  (mem_addr[3:0]),
@@ -185,7 +191,7 @@ module soc_top #(
     wire        timer_irq_pulse;
     timer u_timer (
         .clk       (clk),
-        .rst_n     (rst_n),
+        .rst_n     (rst_n_sync),
         .sel       (sel_timer),
         .wstrb     (wstrb_eff),
         .addr      (mem_addr[3:0]),

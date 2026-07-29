@@ -19,10 +19,10 @@
 //                   from the register file) internal to the core, not
 //                   reachable or meaningful from soc_top.v.
 //
-// Deliberately NOT waived: the SYNCASYNCNET warning at the soc_top.v /
-// picorv32.v boundary (rst_n used async in soc_top.v, sync inside
-// picorv32.v) - that one crosses into code we own and was flagged for
-// human review rather than suppressed here.
+// No SYNCASYNCNET waiver here: that warning (rst_n used async in soc_top.v/
+// peripherals, sync inside picorv32.v) crossed into code we own, so it was
+// fixed at the source instead of suppressed - see rtl/rst_sync.v and
+// docs/reset.md.
 // =============================================================================
 `verilator_config
 

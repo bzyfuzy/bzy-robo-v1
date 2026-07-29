@@ -75,7 +75,8 @@ Every peripheral uses the same interface as `rtl/pwm.v` (the template):
     input  [31:0] wdata;
     output [31:0] rdata;   // combinational read mux inside the peripheral
 
-Async active-low `rst_n`. External async inputs (encoder phases, future
+Async active-low `rst_n` — fed from `rst_sync.v`'s synchronized output, not
+the raw external pin (see `docs/reset.md`). External async inputs (encoder phases, future
 sensor lines) pass through 2FF synchronizers before any logic. Outputs
 that touch actuators must be glitch-free (see PWM's double-buffered DUTY).
 Determinism is a feature: bus accesses are fixed-latency; no
@@ -86,8 +87,8 @@ bits are write-1-to-clear from the ISR, never auto-clearing on read.
 
 Lint (run before every commit; zero warnings is the bar):
 
-    verilator --lint-only -Wall verilator.vlt rtl/soc_top.v rtl/pwm.v \
-              rtl/uart_tx.v rtl/quad_enc.v rtl/timer.v rtl/picorv32.v
+    verilator --lint-only -Wall verilator.vlt rtl/soc_top.v rtl/rst_sync.v \
+              rtl/pwm.v rtl/uart_tx.v rtl/quad_enc.v rtl/timer.v rtl/picorv32.v
 
 `rtl/picorv32.v` must be included (soc_top.v instantiates it). `verilator.vlt`
 (repo root) waives picorv32.v's pre-existing vendored-style warnings by file
@@ -100,8 +101,8 @@ Full-SoC simulation (no RISC-V toolchain needed):
     cd sim
     python3 ../fw/gen_firmware.py
     iverilog -g2005-sv -o tb_soc.vvp tb_soc.v ../rtl/soc_top.v \
-             ../rtl/pwm.v ../rtl/uart_tx.v ../rtl/quad_enc.v \
-             ../rtl/timer.v ../rtl/picorv32.v
+             ../rtl/rst_sync.v ../rtl/pwm.v ../rtl/uart_tx.v \
+             ../rtl/quad_enc.v ../rtl/timer.v ../rtl/picorv32.v
     vvp tb_soc.vvp            # add +trace for tb_soc.vcd
 
 Add every new RTL file to both command lines above (and keep README in
@@ -157,12 +158,22 @@ verification state.
    uniform 32-bit bus convention (soc_top.v's `mem_addr[23:13]` sparse-decode
    gap, uart_tx.v's `wstrb[3:1]`/`wdata[31:8]`, quad_enc.v's `wdata[31:1]`).
    One cross-boundary SYNCASYNCNET (`rst_n` async in soc_top.v/peripherals,
-   sync inside picorv32.v) was waived only after trying the real fix
-   (converting soc_top.v's own regs to sync reset) and confirming it just
-   relocates the same warning to the peripherals — full elimination would
-   require making every peripheral sync-reset, which breaks the
-   actuator-safety rationale for the peripheral bus convention's async-reset
-   rule, so the mismatch is inherent to the architecture, not a bug.
+   sync inside picorv32.v) was initially waived after a first attempt at
+   fixing it (converting soc_top.v's own regs to sync reset) just relocated
+   the same warning to the peripherals. Root-caused and actually fixed
+   (2026-07-29, no waiver anymore): added `rtl/rst_sync.v`, a standard
+   reset synchronizer (async assert, 2FF sync de-assert — see
+   `docs/reset.md`) that the raw external `rst_n` now feeds exclusively;
+   every other register (soc_top's own, every peripheral, the CPU) resets
+   from its output. picorv32 still consumes resetn purely synchronously
+   internally (vendored, unchangeable) while everything else consumes the
+   same synchronized value asynchronously — verilator's SYNCASYNCNET check
+   flags same-*net* sync/async mixing, not same-*value* mixing, so
+   `soc_top.v` feeds picorv32 through a distinctly-named alias wire
+   (`cpu_resetn`, `= rst_n_sync`) purely to keep it a separate net for that
+   one consumer; confirmed empirically (a plain continuous-assign alias is
+   sufficient, verified in isolation before applying it here) and confirmed
+   the full lint command now exits with zero warnings.
 1. CI workflow: lint + all sims on every push (GitHub Actions) — done
    (`.github/workflows/ci.yml`: verilator lint gated on zero warnings, plus
    tb_soc integration + tb_quad_enc unit, each gated on `RESULT: PASS`).

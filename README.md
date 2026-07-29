@@ -27,7 +27,7 @@ Per-peripheral register reference, bit fields, and design notes: [docs/](docs/).
 ```bash
 cd sim
 python3 ../fw/gen_firmware.py      # hand-assembled boot firmware -> firmware.hex
-iverilog -g2005-sv -o tb_soc.vvp tb_soc.v ../rtl/soc_top.v \
+iverilog -g2005-sv -o tb_soc.vvp tb_soc.v ../rtl/soc_top.v ../rtl/rst_sync.v \
          ../rtl/pwm.v ../rtl/uart_tx.v ../rtl/quad_enc.v ../rtl/timer.v ../rtl/picorv32.v
 vvp tb_soc.vvp                     # add: vvp tb_soc.vvp +trace  for a VCD
 ```
@@ -52,6 +52,9 @@ adapter at clk/UART_DIV baud.
   loads only at frame boundaries, so the servo never sees a torn pulse.
 - Every bus access completes in exactly one wait state — deterministic
   timing, the property the control domain of the robot SoC is built on.
+- The raw external `rst_n` feeds only `rtl/rst_sync.v`; every register in
+  the design resets from its synchronized output instead - see
+  [docs/reset.md](docs/reset.md).
 - `fw/gen_firmware.py` is a readable mini-assembler: every RV32I encoding
   (LUI/ADDI/LW/SW/BNE/BLT/JAL), plus PicoRV32's custom IRQ opcodes
   (maskirq/retirq), written out by hand - see [docs/timer.md](docs/timer.md)
