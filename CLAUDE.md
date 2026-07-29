@@ -30,7 +30,7 @@ when"), and any move is its own commit with zero functional changes.
       memory/         # create when: RAM/scratchpads leave soc_top.v
       top/            # create at next restructure: soc_top.v
     tb/
-      unit/           # exists: tb_quad_enc.v; add per-peripheral as written
+      unit/           # exists: tb_quad_enc.v, tb_timer.v; add per-peripheral as written
       integration/    # create at next restructure: tb_soc.v
     fw/
       include/        # create when: >1 header (register defs split out)
@@ -184,7 +184,17 @@ verification state.
    mid-frame DUTY write (must not tear a pulse)
 5. Unit tb for quad_enc — done (`tb/unit/tb_quad_enc.v`: all 8 legal
    transitions, all 4 illegal skips, clear, signed overflow/underflow at
-   the 32-bit boundary, contact bounce, reset); timer unit tb still pending
+   the 32-bit boundary, contact bounce, reset). Unit tb for timer — done
+   (2026-07-29, `tb/unit/tb_timer.v`, 51 checks: period accuracy over 11
+   consecutive gaps with cycle-exact spacing, IRQ pulse width/timing,
+   STATUS write-1-to-clear (write-0 no-op, survives unrelated accesses),
+   disable mid-count (holds COUNT at 0, no ticks), re-enable restarts the
+   count from 0 rather than resuming, PERIOD change while running in both
+   directions (growing extends the current period live; shrinking below
+   the current COUNT misses that tick - exact-equality compare, no
+   catch-up), reset state. Mutation-tested against an off-by-one period
+   compare (`== period` instead of `== period - 1`) - caught with 14
+   mismatches, confirmed restored to the real off-by-one-free RTL after.
 6. Bus tests — byte strobes, invalid addresses, back-to-back transactions
 7. Firmware-level test — program-visible results over UART, including an
    ISR-counted timer check (ISR increments, main loop reports)

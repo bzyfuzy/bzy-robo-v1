@@ -46,3 +46,10 @@ jobs:
           iverilog -g2005-sv -o tb_quad_enc.vvp tb_quad_enc.v ../../rtl/quad_enc.v
           vvp tb_quad_enc.vvp | tee tb_quad_enc.log
           grep -q '^RESULT: PASS' tb_quad_enc.log
+
+      - name: Build + run timer unit testbench
+        working-directory: tb/unit
+        run: |
+          iverilog -g2005-sv -o tb_timer.vvp tb_timer.v ../../rtl/timer.v
+          vvp tb_timer.vvp | tee tb_timer.log
+          grep -q '^RESULT: PASS' tb_timer.log

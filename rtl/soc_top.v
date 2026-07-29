@@ -53,6 +53,9 @@ module soc_top #(
     // rst_n_sync asynchronously (see the Peripheral bus convention). Same
     // value, but a distinct net for the CPU keeps that intentional style
     // difference from reading as a cross-wired reset bug.
+    // Do NOT "simplify" this by wiring .resetn(rst_n_sync) directly - that
+    // reintroduces the SYNCASYNCNET warning this alias exists to avoid
+    // (verified: confirmed as a lint failure before adding this wire).
     wire cpu_resetn = rst_n_sync;
 
     // ---- PicoRV32 native memory interface -----------------------------------
