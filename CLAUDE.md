@@ -12,6 +12,15 @@ the peripheral-building + verification-buildout phase.
   `docs/timer.md`). PicoRV32's IRQ interface is non-standard custom-0
   opcodes (getq/setq/retirq/maskirq/waitirq), not CSRs — hand-encoded in
   both `fw/gen_firmware.py` and `fw/start.S`.
+- `ENABLE_MUL(1)` + `ENABLE_FAST_MUL(1)`: real hardware multiply for
+  deterministic PID math in the timer ISR (`docs/control.md`).
+  `ENABLE_MUL` alone selects the vendored bit-serial multiplier (~32+
+  cycles); `ENABLE_FAST_MUL` is the actual single-cycle-class one
+  (measured ~2-cycle pcpi latency) and wins in `picorv32.v`'s generate
+  priority regardless of `ENABLE_MUL` — both are set because `ENABLE_MUL`
+  also gates other MUL-related plumbing. `ENABLE_DIV` stays 0; firmware
+  that needs the CPU's multiply/no-divide split (`fw/main.c`,
+  `fw/gen_firmware.py`) never uses `/` or `%`.
 - SoC top: `rtl/soc_top.v` — address decode on `mem_addr[31:24]`,
   registered one-wait-state ready for every access:
   `mem_ready <= mem_valid && !mem_ready;`
@@ -56,8 +65,12 @@ when"), and any move is its own commit with zero functional changes.
 | 0x0300_0000 | UART TX            | 0x0 DATA, 0x4 STATUS (bit0 busy)                 |
 | 0x0400_0000 | GPIO               | 0x0 LEDs (8-bit)                                 |
 | 0x0500_0000 | Quadrature encoder | 0x0 COUNT (ro, signed 32), 0x4 CTRL (bit0 clear) |
-| 0x0600_0000 | Timer (IRQ)        | 0x0 CTRL, 0x4 PERIOD, 0x8 COUNT, 0xC STATUS      |
+| 0x0600_0000 | Timer (IRQ)        | 0x0 CTRL, 0x4 PERIOD, 0x8 COUNT, 0xC STATUS, 0x10 ISR_CYCLES (ro, free-running) |
 | 0x0700_0000 | (next: UART RX)    |                                                  |
+
+Timer is the first peripheral with a 5th register (`ISR_CYCLES` @ 0x10), so
+its `addr` port is 5 bits, not the usual 4 — see the Peripheral bus
+convention below and `docs/timer.md`.
 
 Firmware layout convention: reset code at 0x0, IRQ handler at 0x1000 —
 `gen_firmware.py` and `sections.lds` must both respect this.
@@ -71,9 +84,15 @@ Every peripheral uses the same interface as `rtl/pwm.v` (the template):
 
     input  sel;            // address-decoded select from soc_top
     input  [3:0] wstrb;    // byte write strobes; 0000 = read
-    input  [3:0] addr;     // word-aligned offset within the peripheral
+    input  [3:0] addr;     // byte offset within the peripheral (word-aligned:
+                           // only bits [3:2] vary, so 4 bits reaches exactly
+                           // 4 registers — 0x0/0x4/0x8/0xC)
     input  [31:0] wdata;
     output [31:0] rdata;   // combinational read mux inside the peripheral
+
+A peripheral needing a 5th register widens `addr` for its own instantiation
+only (`timer.v` is the first: 5 bits, reaching 0x10 — see the memory map
+above). This is a per-peripheral exception, not a convention change.
 
 Async active-low `rst_n` — fed from `rst_sync.v`'s synchronized output, not
 the raw external pin (see `docs/reset.md`). External async inputs (encoder phases, future
@@ -139,9 +158,10 @@ only when a board is chosen, `asic/` only when an ASIC artifact exists.
 
 | Item                          | RTL     | Simulated & PASS confirmed |
 | ----------------------------- | ------- | -------------------------- |
-| Baseline (PWM+UART+GPIO boot) | done    | yes (original baseline)    |
-| Quadrature encoder            | written | yes (2026-07-29, iverilog integration tb: enc_errors=0, enc_count=9) |
-| Timer + IRQ                   | written | yes (2026-07-29, iverilog integration tb: ticks=199, period_errors=0, led_errors=0) |
+| Baseline (PWM+UART+GPIO boot) | done    | yes (original baseline; `sim/tb_soc.v`'s firmware no longer touches GPIO as of the closed-loop demo below, so its LED-mirror check was retired along with it — GPIO/LEDs themselves are unchanged and untested by the current integration tb) |
+| Quadrature encoder            | written | yes (unit tb `tb/unit/tb_quad_enc.v`, 24 checks; also driven live by the closed-loop plant in `sim/tb_soc.v` now — see below) |
+| Timer + IRQ                   | written | yes (unit tb `tb/unit/tb_timer.v`, 55 checks, incl. the `>=` fix + `ISR_CYCLES`; integration: `sim/tb_soc.v` `period_errors=0` over 1200 ticks) |
+| Closed-loop position control (phase A) | written | yes (2026-07-29, `sim/tb_soc.v`: both profile steps settle well inside the 300-tick budget with low overshoot — see below and `docs/control.md`) |
 
 Update this table the moment a sim actually runs. "Hand-traced" is not a
 verification state.
@@ -176,7 +196,8 @@ verification state.
    the full lint command now exits with zero warnings.
 1. CI workflow: lint + all sims on every push (GitHub Actions) — done
    (`.github/workflows/ci.yml`: verilator lint gated on zero warnings, plus
-   tb_soc integration + tb_quad_enc unit, each gated on `RESULT: PASS`).
+   tb_soc integration + tb_quad_enc unit + tb_timer unit, each gated on
+   `RESULT: PASS`).
 2. Run the existing integration tb — confirm encoder + timer PASS — done
    (2026-07-29, see Verification status table)
 3. Self-checking UART test — exact byte sequence
@@ -212,18 +233,45 @@ verification state.
    live-updated while PWM's DUTY is deliberately double-buffered (actuator
    vs. our-own-ISR consumer) are both written up in `docs/timer.md`.
 6. Bus tests — byte strobes, invalid addresses, back-to-back transactions
-7. Firmware-level test — program-visible results over UART, including an
-   ISR-counted timer check (ISR increments, main loop reports)
+7. Firmware-level test — program-visible results over UART — done
+   (2026-07-29): the closed-loop control demo's hex telemetry
+   (`P=/T=/D=/C=` — position/target/duty/ISR-cycles) is exactly this,
+   decoded live from the UART pin by `sim/tb_soc.v`'s existing `uart_mon`.
+   See item 9 below and `docs/control.md`.
 8. Yosys synthesis check (before the FPGA step)
+9. Closed-loop position control, phase A (autonomous profile, no new
+   actuator) — done (2026-07-29, `docs/control.md`): fixed-point PID
+   (Q8, `KP=800 KI=1 KD=800`) in the timer ISR, conditional-integration
+   anti-windup, duty clamped to PWM's existing [1000,2000] range. Profile
+   `0 -> +400 -> -200` counts, `sim/tb_soc.v` closes the loop with a
+   behavioral velocity plant (duty -> lag -> velocity -> integrated
+   position -> real quadrature transitions back into the encoder inputs).
+   Both steps settle within the 300-ISR-tick budget with room to spare
+   (143, 195 ticks) and low overshoot (1.5%, 0.8%) — `RESULT: PASS` gates
+   on both. Independently cross-checked against `fw/control_model.py` (a
+   Python re-implementation of the same fixed-point PID + plant), which
+   agrees within a few ticks/counts (see `docs/control.md` for why exact
+   match isn't expected). `rtl/timer.v`'s new `ISR_CYCLES` register
+   measured real ISR duration at 168-184 cycles against a 2000-cycle
+   budget — "measure, don't guess," not an assumed number. `fw/main.c`
+   carries the same PID logic for real hardware, but the CI environment
+   has no riscv32 toolchain, so it's written and reasoned through but not
+   compiled here — hand off `cd fw && make` to whoever has the toolchain.
+   Next (phase B, not yet): a real actuator/plant instead of the
+   behavioral model, host-commanded setpoints instead of the fixed
+   profile.
 
 ## Peripheral roadmap
 
 1. ~~Quadrature encoder (0x0500_0000)~~ — RTL done (2FF sync, 4-state
-   decoder, signed COUNT, clear); sim verification pending
+   decoder, signed COUNT, clear); sim verified (unit tb + integration,
+   see Verification status table)
 2. ~~Timer + interrupt (0x0600_0000)~~ — RTL done (irq[3] every PERIOD
-   clks, ISR increments counter -> LEDs, `docs/timer.md`); sim
-   verification pending; next: closed-loop position demo
-   (encoder -> PID -> PWM in the 1 kHz ISR)
+   clks, `ISR_CYCLES` @ 0x10, `docs/timer.md`); sim verified. ~~Closed-loop
+   position demo (encoder -> PID -> PWM in the ISR)~~ — phase A done
+   (autonomous profile, behavioral plant; see ladder item 9 and
+   `docs/control.md`). Next: phase B (real actuator/plant, host-commanded
+   setpoints)
 3. UART RX — start-bit detect, mid-bit sampling, small FIFO
 4. I2C master — MPU-6050 IMU
 5. SPI master

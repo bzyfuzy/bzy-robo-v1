@@ -14,6 +14,8 @@
 //     period to the new value; shrinking PERIOD below the current COUNT
 //     fires the tick on the very next clock (>= compare, no silent miss),
 //     checked with cycle-exact timing
+//   - ISR_CYCLES (0x10): free-running, advances by exactly the elapsed
+//     clock count regardless of enable state, resets to 0 on rst_n
 // =============================================================================
 `timescale 1ns / 1ps
 
@@ -25,7 +27,7 @@ module tb_timer;
     reg        rst_n;
     reg        sel;
     reg [3:0]  wstrb;
-    reg [3:0]  addr;
+    reg [4:0]  addr;
     reg [31:0] wdata;
     wire [31:0] rdata;
     wire        irq_pulse;
@@ -55,7 +57,7 @@ module tb_timer;
     endtask
 
     // ---- register bus helpers -------------------------------------------
-    task write_reg(input [3:0] a, input [31:0] d);
+    task write_reg(input [4:0] a, input [31:0] d);
         begin
             @(negedge clk);
             sel = 1'b1; wstrb = 4'hF; addr = a; wdata = d;
@@ -65,7 +67,7 @@ module tb_timer;
         end
     endtask
 
-    task read_reg(input [3:0] a, output [31:0] d);
+    task read_reg(input [4:0] a, output [31:0] d);
         begin
             addr = a;
             #1;
@@ -126,6 +128,7 @@ module tb_timer;
 
     integer t_prev, t_now, i;
     integer enable_edge_time;
+    integer isr_cyc_a;
 
     initial begin
         if ($test$plusargs("trace")) begin
@@ -251,6 +254,23 @@ module tb_timer;
               "shrinking PERIOD below COUNT fires the tick on the very next clock (>= compare, no silent miss)");
         read_reg(4'hC, rv); check(rv, 1, "STATUS set - the tick really fired, not silently skipped");
         write_reg(4'h0, 32'd0);                  // disable, clean state
+
+        // ---- ISR_CYCLES: free-running cycle counter (0x10) -----------------
+        $display("[TEST] ISR_CYCLES free-running counter");
+        read_reg(5'h10, rv);
+        isr_cyc_a = rv;
+        repeat (37) @(posedge clk);               // arbitrary, asymmetric count
+        read_reg(5'h10, rv);
+        check(rv - isr_cyc_a, 37, "ISR_CYCLES advances by exactly the elapsed clock count");
+        read_reg(5'h00, rv);
+        check(rv, 0, "(sanity) still disabled while ISR_CYCLES kept counting");
+        rst_n = 1'b0;
+        repeat (4) @(posedge clk);
+        @(negedge clk);
+        rst_n = 1'b1;
+        repeat (4) @(posedge clk);
+        read_reg(5'h10, rv);
+        check(rv, 4, "ISR_CYCLES resets to 0 on rst_n, then counts post-reset clocks");
 
         $display("");
         $display("[TMR ] checks=%0d errors=%0d", checks, errors);

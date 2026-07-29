@@ -4,6 +4,7 @@ sim/*.vcd
 sim/*.log
 fw/*.elf
 fw/*.hex
+fw/__pycache__/
 tb/**/*.vvp
 tb/**/*.vcd
 tb/**/*.log

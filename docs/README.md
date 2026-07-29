@@ -17,3 +17,9 @@ SoC infrastructure (not memory-mapped):
 | Block                | Doc |
 |----------------------|-----|
 | Reset synchronizer   | [reset.md](reset.md) |
+
+Applications built on top of the peripherals above:
+
+| Demo                              | Doc |
+|-----------------------------------|-----|
+| Closed-loop position control (PID)| [control.md](control.md) |

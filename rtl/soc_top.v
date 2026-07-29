@@ -90,7 +90,15 @@ module soc_top #(
 
     picorv32 #(
         .ENABLE_COUNTERS (1),
-        .ENABLE_MUL      (0),
+        // ENABLE_MUL alone would select picorv32's vendored bit-serial
+        // multiplier (~32+ cycle latency, unsuitable for per-tick ISR math);
+        // ENABLE_FAST_MUL is required for the actual single-cycle-class
+        // combinational multiplier (measured 2-cycle pcpi latency via
+        // ISR_CYCLES - see docs/control.md). Both are needed: the
+        // FAST variant wins in picorv32.v's generate priority regardless of
+        // ENABLE_MUL, but ENABLE_MUL also gates other MUL-related plumbing.
+        .ENABLE_MUL      (1),
+        .ENABLE_FAST_MUL (1),
         .ENABLE_DIV      (0),
         .ENABLE_IRQ      (1),
         .PROGADDR_RESET  (32'h0000_0000),
@@ -205,7 +213,7 @@ module soc_top #(
         .rst_n     (rst_n_sync),
         .sel       (sel_timer),
         .wstrb     (wstrb_eff),
-        .addr      (mem_addr[3:0]),
+        .addr      (mem_addr[4:0]),   // 5 bits: timer has a 5th register (ISR_CYCLES @ 0x10)
         .wdata     (mem_wdata),
         .rdata     (timer_rdata),
         .irq_pulse (timer_irq_pulse)

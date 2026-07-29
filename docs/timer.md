@@ -12,6 +12,7 @@ IRQ: drives PicoRV32 `irq[3]`, one clk-wide pulse per tick
 | 0x4    | PERIOD | R/W    | 0x0   | clk cycles per tick. PERIOD=0 disables ticking even if enabled. |
 | 0x8    | COUNT  | R      | 0x0   | current up-counter value, 0..PERIOD-1 |
 | 0xC    | STATUS | R/W    | 0x0   | bit0 = IRQ: sticky, set on every tick, write 1 to clear (W1C) |
+| 0x10   | ISR_CYCLES | R  | 0x0   | free-running cycle counter - increments every clk unconditionally (independent of enable/PERIOD); sample twice to measure elapsed cycles. Note: `addr` is 5 bits here (not the usual 4) to reach this offset - see the Peripheral bus convention. |
 
 `irq_pulse` fires exactly once, for exactly one clk cycle, PERIOD cycles
 after the counter was last reset (by enable, or by a previous tick) - same

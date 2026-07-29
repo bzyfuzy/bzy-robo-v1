@@ -5,9 +5,10 @@ a glitch-free servo PWM peripheral, a TX UART for debug prints, and a
 GPIO/LED register — all on PicoRV32's simple native memory bus.
 
 **Status: verified in simulation.** The CPU boots, prints over a decoded
-serial line, sweeps the servo PWM duty in clean 20 ms frames, tracks a
-quadrature encoder's position, and services a periodic timer interrupt
-(first real ISR) that mirrors a tick count onto the LEDs.
+serial line, then runs a closed-loop position-control demo entirely in the
+timer ISR: a fixed-point PID reads the quadrature encoder and drives the
+servo PWM duty to track a step profile (0 -> +400 -> -200 counts), with
+hex telemetry over UART. See [docs/control.md](docs/control.md).
 
 ## Memory map
 
@@ -18,7 +19,7 @@ quadrature encoder's position, and services a periodic timer interrupt
 | 0x0300_0000 | UART               | 0x0 DATA, 0x4 STATUS(bit0 busy)              |
 | 0x0400_0000 | GPIO               | 0x0 LEDs                                     |
 | 0x0500_0000 | Quadrature encoder | 0x0 COUNT (signed), 0x4 CTRL(bit0 clear)     |
-| 0x0600_0000 | Timer (IRQ)        | 0x0 CTRL, 0x4 PERIOD, 0x8 COUNT, 0xC STATUS  |
+| 0x0600_0000 | Timer (IRQ)        | 0x0 CTRL, 0x4 PERIOD, 0x8 COUNT, 0xC STATUS, 0x10 ISR_CYCLES (ro) |
 
 Per-peripheral register reference, bit fields, and design notes: [docs/](docs/).
 
@@ -32,11 +33,13 @@ iverilog -g2005-sv -o tb_soc.vvp tb_soc.v ../rtl/soc_top.v ../rtl/rst_sync.v \
 vvp tb_soc.vvp                     # add: vvp tb_soc.vvp +trace  for a VCD
 ```
 
-Expected: `[UART] 'O' 'K'`, PWM pulses stepping 1000 -> 1100 -> ... ticks,
-encoder COUNT tracking a driven 24-step-forward/15-step-reverse waveform
-with zero mismatches, a 1 kHz-style timer interrupt ticking every 2000 clks
-in sim (its ISR mirrors a running counter onto the LEDs, checked with zero
-errors), final line `RESULT: PASS`.
+Expected: `[UART] 'O' 'K'`, then hex telemetry lines (`P=... T=... D=... C=...`
+- position/target/duty/last-ISR-cycles) roughly every 100 ticks, a 1
+kHz-style timer interrupt ticking every 2000 clks in sim with zero period
+errors, `[CTRL]` lines showing each profile step (target 0 -> +400 -> -200)
+settling within the 300-tick budget with low overshoot, final line
+`RESULT: PASS`. See [docs/control.md](docs/control.md) for the full design
+and a Python cross-check (`fw/control_model.py`).
 
 ## Real hardware
 
@@ -65,10 +68,13 @@ adapter at clk/UART_DIV baud.
 
 1. **(done)** CPU + PWM + UART: servo sweep
 2. **(done)** Quadrature encoder input
-3. **(this)** Timer interrupt (1 kHz tick, first ISR); next: encoder -> PID -> PWM closed-loop position control
-4. NPU integration (perception domain) + camera capture
-5. Mailbox contract: vision detections -> control setpoints
-6. Replace the SBC in the pan/tilt tracker rig; measure latency and jitter
+3. **(done)** Timer interrupt (1 kHz tick, first ISR)
+4. **(this, phase A)** Encoder -> PID -> PWM closed-loop position control:
+   autonomous profile, behavioral plant (`docs/control.md`); next (phase B):
+   real actuator/plant, host-commanded setpoints
+5. NPU integration (perception domain) + camera capture
+6. Mailbox contract: vision detections -> control setpoints
+7. Replace the SBC in the pan/tilt tracker rig; measure latency and jitter
 
 ## License
 
